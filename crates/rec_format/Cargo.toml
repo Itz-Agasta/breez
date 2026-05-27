@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bincode = "3.0.0"
-serde = { workspace = true }
 anyhow = { workspace = true }
+wincode = { version = "0.5.5", features = ["derive"] }
