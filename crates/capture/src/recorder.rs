@@ -69,6 +69,9 @@ impl Recorder {
     /// Create (or open) the package at `path` and start recording the
     /// primary display plus system audio into a new take.
     pub fn start(path: impl Into<PathBuf>, config: RecordConfig) -> Result<Self, CaptureError> {
+        if config.fps == 0 {
+            return Err(CaptureError::Unsupported("fps must be > 0".to_owned()));
+        }
         let path = path.into();
         let package = if path.join("manifest.json").exists() {
             RecPackage::open(&path)?
@@ -135,7 +138,7 @@ fn run_capture(
     let display_size: Arc<OnceLock<(u32, u32)>> = Arc::new(OnceLock::new());
     let events_rel = RecPackage::events_rel(take_id);
     let input_logger = InputLogger::start(
-        package.resolve(&events_rel),
+        package.resolve(&events_rel)?,
         Arc::clone(&anchor),
         Arc::clone(&display_size),
     );
@@ -270,7 +273,7 @@ impl<'a> VideoStream<'a> {
                 fps: self.fps,
                 pixel_format,
             };
-            let dest = self.package.resolve(&RecPackage::video_rel(self.take_id));
+            let dest = self.package.resolve(&RecPackage::video_rel(self.take_id))?;
             self.encoder = Some(VideoEncoder::create(&dest, &config)?);
             self.width = frame.width;
             self.height = frame.height;
@@ -312,8 +315,10 @@ impl<'a> VideoStream<'a> {
         encoder.finish()?;
         Ok((
             VideoSummary {
-                width: self.width,
-                height: self.height,
+                // The yuv420p encode crops odd dimensions down to even;
+                // report what the file actually contains.
+                width: self.width & !1,
+                height: self.height & !1,
                 frames: self.frames,
             },
             RecPackage::video_rel(self.take_id),
@@ -361,11 +366,17 @@ impl<'a> AudioStream<'a> {
             pinray::AudioData::Planar(planes) => interleave_f32(planes),
         };
         if self.encoder.is_none() {
+            if frame.sample_rate == 0 || frame.channels == 0 {
+                return Err(CaptureError::Unsupported(format!(
+                    "audio stream {} Hz / {} channels",
+                    frame.sample_rate, frame.channels
+                )));
+            }
             let config = AudioEncoderConfig {
                 sample_rate: frame.sample_rate,
                 channels: frame.channels,
             };
-            let dest = self.package.resolve(&RecPackage::audio_rel(self.take_id));
+            let dest = self.package.resolve(&RecPackage::audio_rel(self.take_id))?;
             self.encoder = Some(AudioEncoder::create(&dest, &config)?);
             self.sample_rate = frame.sample_rate;
             self.channels = frame.channels;
@@ -379,7 +390,17 @@ impl<'a> AudioStream<'a> {
                 let mut silence_bytes =
                     (gap_ns as i128 * bytes_per_second as i128 / 1_000_000_000) as usize;
                 silence_bytes -= silence_bytes % (self.channels as usize * 4);
-                encoder.push_samples(&vec![0u8; silence_bytes])?;
+                // Chunked (max 1s per write) so a pathological timestamp
+                // jump cannot trigger a giant allocation.
+                if silence_bytes > 0 {
+                    let chunk = vec![0u8; (bytes_per_second as usize).min(silence_bytes)];
+                    let mut remaining = silence_bytes;
+                    while remaining > 0 {
+                        let n = chunk.len().min(remaining);
+                        encoder.push_samples(&chunk[..n])?;
+                        remaining -= n;
+                    }
+                }
             }
         }
         encoder.push_samples(&bytes)?;

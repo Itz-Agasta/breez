@@ -40,7 +40,9 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, segments: &[Segment<'_>], he
         })
         .collect();
     let total: f32 = widths.iter().sum::<f32>() + 6.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(total, height), Sense::hover());
+    // The container's auto-assigned id namespaces the segment ids, so
+    // several segmented controls can share one Ui scope without colliding.
+    let (rect, container) = ui.allocate_exact_size(vec2(total, height), Sense::hover());
     ui.painter().rect_filled(
         rect,
         CornerRadius::same(theme::RADIUS_BUTTON),
@@ -55,7 +57,7 @@ pub fn segmented(ui: &mut Ui, selected: &mut usize, segments: &[Segment<'_>], he
         x += width;
         let response = ui.interact(
             seg_rect,
-            ui.id().with(("segment", i)),
+            container.id.with(("segment", i)),
             if segment.enabled {
                 Sense::click()
             } else {

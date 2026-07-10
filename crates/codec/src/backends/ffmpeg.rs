@@ -129,3 +129,14 @@ impl FfmpegSink {
         }
     }
 }
+
+/// Reap the child on error paths so dropped encoders never leave zombie
+/// ffmpeg processes. After a clean `finish` the process is already waited,
+/// so kill/wait are harmless no-ops.
+impl Drop for FfmpegSink {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}

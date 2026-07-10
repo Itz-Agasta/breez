@@ -6,9 +6,8 @@ use eframe::egui::Ui;
 use super::{row_label, slider_row};
 use crate::app::Session;
 use crate::theme;
+use crate::ui::editor::RATIOS;
 use crate::ui::widgets::{self, segmented::Segment};
-
-const RATIOS: &[&str] = &["16:9", "9:16", "1:1"];
 
 pub fn show(ui: &mut Ui, session: &mut Session) {
     let style = &mut session.project.style;

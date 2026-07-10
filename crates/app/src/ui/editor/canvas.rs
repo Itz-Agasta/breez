@@ -7,12 +7,10 @@ use eframe::egui::{
     pos2, vec2,
 };
 
-use super::format_ns;
+use super::{RATIOS, format_ns};
 use crate::app::Session;
 use crate::theme;
 use crate::ui::widgets::{self, segmented::Segment};
-
-const RATIOS: &[&str] = &["16:9", "9:16", "1:1"];
 
 pub fn show(ui: &mut Ui, session: &mut Session) {
     CentralPanel::no_frame()
@@ -54,11 +52,13 @@ fn top_strip(ui: &mut Ui, session: &mut Session) {
 
 fn stage(ui: &mut Ui, session: &Session) {
     let outer = ui.available_rect_before_wrap().shrink2(vec2(16.0, 0.0));
-    let stage = Rect::from_min_max(outer.min, pos2(outer.max.x, outer.max.y - 16.0));
-    if stage.height() < 40.0 {
+    let bounds = Rect::from_min_max(outer.min, pos2(outer.max.x, outer.max.y - 16.0));
+    if bounds.height() < 40.0 {
         return;
     }
     let style = &session.project.style;
+    // The stage carries the output aspect ratio the user picked.
+    let stage = fit_aspect(bounds, ratio_aspect(&style.ratio));
     let (top, bottom) = wallpaper_colors(&style.wallpaper);
     widgets::vertical_gradient(ui.painter(), stage, theme::RADIUS_CARD, top, bottom);
 
@@ -69,17 +69,13 @@ fn stage(ui: &mut Ui, session: &Session) {
     let inset = style.padding as f32 * stage.width() / 1440.0;
     let avail = stage.shrink(inset.max(8.0));
     let aspect = take.width.max(1) as f32 / take.height.max(1) as f32;
-    let size = if avail.width() / avail.height() > aspect {
-        vec2(avail.height() * aspect, avail.height())
-    } else {
-        vec2(avail.width(), avail.width() / aspect)
-    };
-    let frame = Rect::from_center_size(avail.center(), size);
+    let frame = fit_aspect(avail, aspect);
 
-    shadow(ui, frame, style.shadow, style.radius as u8);
+    let radius = style.radius.min(255) as u8;
+    shadow(ui, frame, style.shadow, radius);
     ui.painter().rect_filled(
         frame,
-        CornerRadius::same(style.radius as u8),
+        CornerRadius::same(radius),
         Color32::from_rgb(0x05, 0x05, 0x05),
     );
     ui.painter().text(
@@ -123,6 +119,24 @@ fn shadow(ui: &Ui, frame: Rect, strength: u32, radius: u8) {
             CornerRadius::same(radius.saturating_add(expand as u8)),
             Color32::from_black_alpha(layer_alpha),
         );
+    }
+}
+
+/// Largest rect of the given aspect ratio centered inside `bounds`.
+fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
+    let size = if bounds.width() / bounds.height() > aspect {
+        vec2(bounds.height() * aspect, bounds.height())
+    } else {
+        vec2(bounds.width(), bounds.width() / aspect)
+    };
+    Rect::from_center_size(bounds.center(), size)
+}
+
+fn ratio_aspect(ratio: &str) -> f32 {
+    match ratio {
+        "9:16" => 9.0 / 16.0,
+        "1:1" => 1.0,
+        _ => 16.0 / 9.0,
     }
 }
 

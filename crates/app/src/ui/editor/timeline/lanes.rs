@@ -13,6 +13,8 @@ const LANES: &[(&str, f32)] = &[
 ];
 
 pub fn show(ui: &mut Ui) {
+    // Rows must touch so gutter and separator lines stay continuous.
+    ui.spacing_mut().item_spacing.y = 0.0;
     for (label, height) in LANES {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), *height), Sense::hover());
         ui.painter().text(

@@ -59,7 +59,11 @@ fn pill(ui: &mut Ui, label: &str, kind: PillKind, enabled: bool) -> Response {
             } else {
                 theme::TEXT_LABEL
             },
-            Some(theme::BORDER_STRONG),
+            Some(if enabled {
+                theme::BORDER_STRONG
+            } else {
+                theme::BORDER
+            }),
         ),
     };
     let radius = CornerRadius::same(theme::RADIUS_BUTTON);

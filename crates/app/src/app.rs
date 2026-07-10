@@ -148,6 +148,20 @@ impl BreezApp {
 }
 
 impl eframe::App for BreezApp {
+    /// Finish an in-flight recording cleanly instead of leaving it to crash
+    /// recovery when the window closes mid-take.
+    fn on_exit(&mut self) {
+        match std::mem::replace(&mut self.flow, RecordFlow::Idle) {
+            RecordFlow::Recording { recorder, .. } => {
+                let _ = recorder.stop();
+            }
+            RecordFlow::Stopping { rx, .. } => {
+                let _ = rx.recv();
+            }
+            RecordFlow::Idle => {}
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_flow(ui.ctx());
 

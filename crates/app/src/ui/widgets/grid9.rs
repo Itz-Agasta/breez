@@ -9,7 +9,9 @@ const GAP: f32 = 4.0;
 
 pub fn grid9(ui: &mut Ui, anchor: &mut [f32; 2]) -> bool {
     let side = CELL * 3.0 + GAP * 2.0;
-    let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+    // The container's auto-assigned id namespaces the cell ids, so several
+    // grids can share one Ui scope without colliding.
+    let (rect, container) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
     let mut changed = false;
     for row in 0..3 {
         for col in 0..3 {
@@ -18,7 +20,7 @@ pub fn grid9(ui: &mut Ui, anchor: &mut [f32; 2]) -> bool {
                 rect.min.y + row as f32 * (CELL + GAP),
             );
             let cell = Rect::from_min_size(min, vec2(CELL, CELL));
-            let response = ui.interact(cell, ui.id().with(("grid9", row, col)), Sense::click());
+            let response = ui.interact(cell, container.id.with((row, col)), Sense::click());
             let value = [col as f32 / 2.0, row as f32 / 2.0];
             let selected = *anchor == value;
             let bg = if selected {

@@ -19,6 +19,12 @@ pub enum PackageError {
     Json(#[from] serde_json::Error),
     #[error("not a breez package: {0}")]
     NotAPackage(PathBuf),
+    #[error("package already exists: {0}")]
+    AlreadyExists(PathBuf),
+    #[error("unsupported package version: {0}")]
+    UnsupportedVersion(u32),
+    #[error("invalid package-relative path: {0}")]
+    InvalidPath(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +58,10 @@ impl RecPackage {
     /// manifest. Fails if `root` already contains a file at the manifest path.
     pub fn create(root: impl Into<PathBuf>) -> Result<Self, PackageError> {
         let pkg = Self { root: root.into() };
+        if pkg.manifest_path().exists() {
+            // Overwriting would silently reset the crash-recovery flag.
+            return Err(PackageError::AlreadyExists(pkg.root));
+        }
         for dir in [
             pkg.root.join("media/screen"),
             pkg.root.join("media/audio"),
@@ -65,12 +75,16 @@ impl RecPackage {
         Ok(pkg)
     }
 
-    /// Open an existing package, verifying the manifest format tag.
+    /// Open an existing package, verifying the manifest format tag and
+    /// version (a newer package must not be rewritten by an older build).
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, PackageError> {
         let pkg = Self { root: root.into() };
         let manifest = pkg.manifest()?;
         if manifest.format != FORMAT {
             return Err(PackageError::NotAPackage(pkg.root));
+        }
+        if manifest.version != VERSION {
+            return Err(PackageError::UnsupportedVersion(manifest.version));
         }
         Ok(pkg)
     }
@@ -102,8 +116,18 @@ impl RecPackage {
     }
 
     /// Resolve a package-relative path (as stored in `project.json`).
-    pub fn resolve(&self, rel: &str) -> PathBuf {
-        self.root.join(rel)
+    /// Rejects absolute paths and `..` so a crafted project file cannot
+    /// reach outside the package directory.
+    pub fn resolve(&self, rel: &str) -> Result<PathBuf, PackageError> {
+        let path = Path::new(rel);
+        let escapes = path.is_absolute()
+            || path
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)));
+        if escapes {
+            return Err(PackageError::InvalidPath(rel.to_owned()));
+        }
+        Ok(self.root.join(rel))
     }
 
     pub fn manifest(&self) -> Result<Manifest, PackageError> {
@@ -130,9 +154,13 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, PackageError> {
 }
 
 /// Write JSON via tmp file + rename so readers never see a torn file and a
-/// crash mid-write leaves the previous version intact.
+/// crash mid-write leaves the previous version intact. Tmp names are unique
+/// per call so concurrent writers cannot clobber each other's tmp file, and
+/// the parent directory is fsynced so the rename survives power loss.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), PackageError> {
-    let tmp = path.with_extension("json.tmp");
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()));
     {
         let mut file = fs::File::create(&tmp)?;
         serde_json::to_writer_pretty(&mut file, value)?;
@@ -140,6 +168,10 @@ pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), Pac
         file.sync_all()?;
     }
     fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -160,6 +192,26 @@ mod tests {
     fn open_should_fail_on_plain_directory() {
         let dir = tempfile::tempdir().unwrap();
         assert!(RecPackage::open(dir.path()).is_err());
+    }
+
+    #[test]
+    fn create_should_fail_when_package_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("demo.rec");
+        RecPackage::create(&root).unwrap();
+        assert!(matches!(
+            RecPackage::create(&root),
+            Err(PackageError::AlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_should_reject_escaping_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = RecPackage::create(dir.path().join("demo.rec")).unwrap();
+        assert!(pkg.resolve("../evil").is_err());
+        assert!(pkg.resolve("/etc/passwd").is_err());
+        assert!(pkg.resolve("media/screen/take-000.mp4").is_ok());
     }
 
     #[test]

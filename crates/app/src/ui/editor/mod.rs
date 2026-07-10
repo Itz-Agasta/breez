@@ -13,6 +13,9 @@ use eframe::egui::Ui;
 use crate::app::Session;
 use breez_core::project::ZoomSegment;
 
+/// Output aspect ratios offered in the canvas strip and inspector.
+pub(crate) const RATIOS: &[&str] = &["16:9", "9:16", "1:1"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Media,

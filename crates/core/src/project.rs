@@ -9,8 +9,11 @@ use crate::package::{PackageError, RecPackage, read_json, write_json_atomic};
 pub struct Project {
     pub version: u32,
     pub name: String,
+    #[serde(default)]
     pub takes: Vec<Take>,
+    #[serde(default)]
     pub timeline: Timeline,
+    #[serde(default)]
     pub style: Style,
 }
 
@@ -26,7 +29,11 @@ impl Project {
     }
 
     pub fn load(package: &RecPackage) -> Result<Self, PackageError> {
-        read_json(&package.project_path())
+        let project: Self = read_json(&package.project_path())?;
+        if project.version != 1 {
+            return Err(PackageError::UnsupportedVersion(project.version));
+        }
+        Ok(project)
     }
 
     pub fn save(&self, package: &RecPackage) -> Result<(), PackageError> {
@@ -51,6 +58,7 @@ pub struct Take {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Timeline {
     pub clips: Vec<Clip>,
     pub zoom: Vec<ZoomSegment>,
@@ -96,6 +104,7 @@ pub struct MusicTrack {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Style {
     pub wallpaper: String,
     pub padding: u32,
@@ -121,6 +130,7 @@ impl Default for Style {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CursorStyle {
     pub click_highlight: bool,
 }

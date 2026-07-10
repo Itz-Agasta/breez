@@ -41,12 +41,14 @@ pub fn show(ui: &mut Ui, duration_ns: u64) {
     }
 }
 
-/// Pick a tick step so labels stay ~70px apart.
+/// Pick a tick step so labels stay ~70px apart. Beyond the nice-step table
+/// the step keeps growing (whole minutes), so tick count stays bounded by
+/// the track width no matter how long the timeline is.
 fn label_step(px_per_sec: f32) -> u64 {
     for step in [1, 2, 5, 10, 15, 30, 60, 120, 300] {
         if px_per_sec * step as f32 >= 70.0 {
             return step;
         }
     }
-    600
+    ((70.0 / px_per_sec / 60.0).ceil() as u64).max(6) * 60
 }
