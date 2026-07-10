@@ -1,7 +1,18 @@
 [package]
-name = "capture"
-version = "0.1.0"
-edition = "2024"
+name = "breez-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
-rec_format = { path = "../rec_format" }
+breez-core.workspace = true
+breez-codec.workspace = true
+pinray.workspace = true
+rdev.workspace = true
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true

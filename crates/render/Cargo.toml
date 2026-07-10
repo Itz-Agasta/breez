@@ -1,5 +1,5 @@
 [package]
-name = "breez-codec"
+name = "breez-render"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,6 +7,3 @@ license.workspace = true
 
 [dependencies]
 breez-core.workspace = true
-ffmpeg-sidecar.workspace = true
-thiserror.workspace = true
-log.workspace = true
