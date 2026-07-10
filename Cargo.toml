@@ -1,11 +1,34 @@
 [workspace]
 members = [
+    "crates/core",
     "crates/capture",
     "crates/codec",
-    "crates/rec_format",
-    "crates/ui",
+    "crates/render",
+    "crates/app",
 ]
 resolver = "3"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+
 [workspace.dependencies]
 anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+crossbeam-channel = "0.5"
+pinray = "0.2"
+ffmpeg-sidecar = "2"
+rdev = "0.5"
+egui = "0.35"
+eframe = "0.35"
+
+breez-core = { path = "crates/core" }
+breez-codec = { path = "crates/codec" }
+breez-capture = { path = "crates/capture" }
+breez-render = { path = "crates/render" }
