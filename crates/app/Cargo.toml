@@ -1,0 +1,13 @@
+[package]
+name = "breez"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+breez-capture.workspace = true
+breez-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+env_logger.workspace = true
