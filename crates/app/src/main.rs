@@ -1,6 +1,7 @@
 //! Breez entry point: frameless window setup and eframe bootstrap.
 
 mod app;
+mod playback;
 mod theme;
 mod ui;
 

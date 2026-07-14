@@ -1,6 +1,6 @@
-//! Right inspector: collapsible sections of styled rows. Phase 2 renders the
-//! sections statically; values bind to the loaded project style but nothing
-//! is persisted or previewed live until Phase 3.
+//! Right inspector: collapsible sections of styled rows. Background, cursor,
+//! and audio bind live to the project style; edits mark the editor dirty and
+//! the app persists them (atomic project.json write) on pointer release.
 
 mod audio;
 mod background;
@@ -31,29 +31,31 @@ pub fn show(ui: &mut Ui, state: &mut EditorState, session: &mut Session) {
                 Stroke::new(1.0, theme::BORDER),
             );
             ScrollArea::vertical().show(ui, |ui| {
+                let mut dirty = false;
                 let mut background_open = state.background_open;
                 section(ui, "Background", &mut background_open, |ui| {
-                    background::show(ui, session);
+                    dirty |= background::show(ui, session);
                 });
                 state.background_open = background_open;
 
                 let mut zoom_open = state.zoom_open;
                 section(ui, "Zoom & pan", &mut zoom_open, |ui| {
-                    zoom::show(ui, &mut state.zoom_draft);
+                    dirty |= zoom::show(ui, state, session);
                 });
                 state.zoom_open = zoom_open;
 
                 let mut cursor_open = state.cursor_open;
                 section(ui, "Cursor", &mut cursor_open, |ui| {
-                    cursor::show(ui, session);
+                    dirty |= cursor::show(ui, session);
                 });
                 state.cursor_open = cursor_open;
 
                 let mut audio_open = state.audio_open;
                 section(ui, "Audio", &mut audio_open, |ui| {
-                    audio::show(ui, session);
+                    dirty |= audio::show(ui, session);
                 });
                 state.audio_open = audio_open;
+                state.dirty |= dirty;
             });
         });
 }

@@ -46,7 +46,7 @@ pub struct BreezApp {
     mode: Mode,
     flow: RecordFlow,
     session: Option<Session>,
-    editor: EditorState,
+    editor: Option<EditorState>,
     error: Option<String>,
 }
 
@@ -57,7 +57,7 @@ impl BreezApp {
             mode: Mode::Record,
             flow: RecordFlow::Idle,
             session: None,
-            editor: EditorState::default(),
+            editor: None,
             error: None,
         }
     }
@@ -78,7 +78,7 @@ impl BreezApp {
                 if let Ok(result) = rx.try_recv() {
                     let flow = std::mem::replace(&mut self.flow, RecordFlow::Idle);
                     if let RecordFlow::Stopping { package_root, .. } = flow {
-                        self.apply_take(package_root, result);
+                        self.apply_take(ctx, package_root, result);
                     }
                 }
             }
@@ -129,7 +129,12 @@ impl BreezApp {
         }
     }
 
-    fn apply_take(&mut self, package_root: PathBuf, result: Result<TakeSummary, CaptureError>) {
+    fn apply_take(
+        &mut self,
+        ctx: &egui::Context,
+        package_root: PathBuf,
+        result: Result<TakeSummary, CaptureError>,
+    ) {
         let opened = result.and_then(|summary| {
             let package = RecPackage::open(&package_root)?;
             let project = Project::load(&package)?;
@@ -137,12 +142,28 @@ impl BreezApp {
         });
         match opened {
             Ok((_, package, project)) => {
-                self.session = Some(Session { package, project });
-                self.editor = EditorState::default();
+                let session = Session { package, project };
+                self.editor = Some(EditorState::new(ctx, &session));
+                self.session = Some(session);
                 self.error = None;
                 self.mode = Mode::Edit;
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Persist pending project edits once the pointer is up, so slider drags
+    /// don't write (and fsync) every frame.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        let (Some(editor), Some(session)) = (&mut self.editor, &self.session) else {
+            return;
+        };
+        if editor.dirty && !ctx.input(|i| i.pointer.any_down()) {
+            editor.dirty = false;
+            if let Err(e) = session.project.save(&session.package) {
+                log::error!("save project: {e}");
+                self.error = Some(format!("save project: {e}"));
+            }
         }
     }
 }
@@ -173,6 +194,11 @@ impl eframe::App for BreezApp {
             busy: !matches!(self.flow, RecordFlow::Idle),
         };
         if let Some(TitlebarAction::SetMode(mode)) = titlebar::show(ui, &titlebar_state) {
+            if mode == Mode::Record
+                && let Some(editor) = &mut self.editor
+            {
+                editor.player.pause();
+            }
             self.mode = mode;
         }
 
@@ -191,17 +217,17 @@ impl eframe::App for BreezApp {
                     None => {}
                 }
             }
-            Mode::Edit => match self.session.as_mut() {
-                Some(session) => {
-                    if let Some(EditorAction::OpenRecord) =
-                        editor::show(ui, &mut self.editor, session)
-                    {
+            Mode::Edit => match (self.session.as_mut(), self.editor.as_mut()) {
+                (Some(session), Some(editor)) => {
+                    if let Some(EditorAction::OpenRecord) = editor::show(ui, editor, session) {
+                        editor.player.pause();
                         self.mode = Mode::Record;
                     }
                 }
-                None => self.mode = Mode::Record,
+                _ => self.mode = Mode::Record,
             },
         }
+        self.autosave(ui.ctx());
     }
 }
 
