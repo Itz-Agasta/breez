@@ -115,6 +115,49 @@ impl RecPackage {
         format!("events/input-{take_id:03}.jsonl")
     }
 
+    /// Disposable thumbnail cache for one take; safe to delete anytime.
+    pub fn thumbs_dir(&self, take_id: u32) -> PathBuf {
+        self.root.join(format!("cache/thumbs/take-{take_id:03}"))
+    }
+
+    /// Disposable waveform-peaks cache for a music file (`rel` as stored in
+    /// `project.json`). Music file names are unique within the package, so
+    /// the file name alone keys the cache.
+    pub fn peaks_path(&self, rel: &str) -> PathBuf {
+        let name = Path::new(rel)
+            .file_name()
+            .map_or_else(|| rel.to_owned(), |n| n.to_string_lossy().into_owned());
+        self.root.join(format!("cache/peaks/{name}.json"))
+    }
+
+    /// Copy an audio file into `media/music/` (deduplicating the name) so
+    /// the package stays self-contained, and return the package-relative
+    /// path for `project.json`.
+    pub fn import_music(&self, src: &Path) -> Result<String, PackageError> {
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| PackageError::InvalidPath(src.display().to_string()))?;
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() => (stem, ext),
+            _ => (name, ""),
+        };
+        for n in 0..1000u32 {
+            let candidate = match (n, ext.is_empty()) {
+                (0, _) => name.to_owned(),
+                (n, true) => format!("{stem}-{n}"),
+                (n, false) => format!("{stem}-{n}.{ext}"),
+            };
+            let dest = self.root.join("media/music").join(&candidate);
+            if dest.exists() {
+                continue;
+            }
+            fs::copy(src, &dest)?;
+            return Ok(format!("media/music/{candidate}"));
+        }
+        Err(PackageError::InvalidPath(name.to_owned()))
+    }
+
     /// Resolve a package-relative path (as stored in `project.json`).
     /// Rejects absolute paths and `..` so a crafted project file cannot
     /// reach outside the package directory.
@@ -212,6 +255,17 @@ mod tests {
         assert!(pkg.resolve("../evil").is_err());
         assert!(pkg.resolve("/etc/passwd").is_err());
         assert!(pkg.resolve("media/screen/take-000.mp4").is_ok());
+    }
+
+    #[test]
+    fn import_music_should_copy_and_deduplicate_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = RecPackage::create(dir.path().join("demo.rec")).unwrap();
+        let src = dir.path().join("song.mp3");
+        std::fs::write(&src, b"audio").unwrap();
+        assert_eq!(pkg.import_music(&src).unwrap(), "media/music/song.mp3");
+        assert_eq!(pkg.import_music(&src).unwrap(), "media/music/song-1.mp3");
+        assert!(pkg.root().join("media/music/song-1.mp3").exists());
     }
 
     #[test]
