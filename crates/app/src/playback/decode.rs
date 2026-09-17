@@ -20,7 +20,11 @@ pub struct SeekCmd {
 
 pub struct DecodedFrame {
     pub generation: u64,
-    pub frame: VideoFrame,
+    /// `None` reports that this generation produced nothing more: the open
+    /// or seek failed, the decode errored, or the stream ended. The UI needs
+    /// that, because it is the only thing that clears `awaiting_seek`, and a
+    /// generation that never reports back wedges scrubbing for good.
+    pub frame: Option<VideoFrame>,
 }
 
 pub struct DecodeHandle {
@@ -66,7 +70,12 @@ fn run(cmd_rx: &Receiver<SeekCmd>, frame_tx: &Sender<DecodedFrame>, ctx: &egui::
             };
             match opened {
                 Ok(d) => decoder = Some((d, cmd.generation)),
-                Err(e) => log::error!("decode open {}: {e}", cmd.path.display()),
+                Err(e) => {
+                    log::error!("decode open {}: {e}", cmd.path.display());
+                    if !report_end(frame_tx, ctx, cmd.generation) {
+                        return;
+                    }
+                }
             }
         }
 
@@ -77,7 +86,7 @@ fn run(cmd_rx: &Receiver<SeekCmd>, frame_tx: &Sender<DecodedFrame>, ctx: &egui::
             Ok(Some(frame)) => {
                 let decoded = DecodedFrame {
                     generation: *generation,
-                    frame,
+                    frame: Some(frame),
                 };
                 // Blocking send paces decode to UI consumption. A full
                 // channel with a pending seek resolves because the UI keeps
@@ -93,11 +102,36 @@ fn run(cmd_rx: &Receiver<SeekCmd>, frame_tx: &Sender<DecodedFrame>, ctx: &egui::
                     Err(TrySendError::Disconnected(_)) => return,
                 }
             }
-            Ok(None) => decoder = None,
+            Ok(None) => {
+                let generation = *generation;
+                decoder = None;
+                if !report_end(frame_tx, ctx, generation) {
+                    return;
+                }
+            }
             Err(e) => {
                 log::error!("decode: {e}");
+                let generation = *generation;
                 decoder = None;
+                if !report_end(frame_tx, ctx, generation) {
+                    return;
+                }
             }
         }
     }
+}
+
+/// Tell the UI this generation is finished. Returns false when the UI is
+/// gone and the thread should exit.
+fn report_end(frame_tx: &Sender<DecodedFrame>, ctx: &egui::Context, generation: u64) -> bool {
+    let sent = frame_tx
+        .send(DecodedFrame {
+            generation,
+            frame: None,
+        })
+        .is_ok();
+    if sent {
+        ctx.request_repaint();
+    }
+    sent
 }

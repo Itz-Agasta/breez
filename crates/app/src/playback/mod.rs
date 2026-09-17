@@ -222,7 +222,16 @@ impl Player {
             if decoded.generation != self.generation {
                 continue;
             }
-            let frame = decoded.frame;
+            let Some(frame) = decoded.frame else {
+                // This generation is finished and produced nothing further.
+                // Clearing the flag is what keeps a later scrub able to
+                // issue a fresh seek instead of deferring forever.
+                self.awaiting_seek = false;
+                if let Some(t_ns) = self.deferred_seek_ns.take() {
+                    self.seek(session, t_ns);
+                }
+                continue;
+            };
             if let Some((take, _)) = self.decoder_pos {
                 let fps = take_of(session, take).map_or(60, |t| t.fps);
                 self.cache.insert(

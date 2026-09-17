@@ -25,9 +25,17 @@ pub struct MusicMix {
 #[derive(Default)]
 struct TrackPlayer {
     player: Option<rodio::Player>,
-    /// Decode or seek failed; don't retry every frame.
+    /// Decoding this file failed; don't retry every frame.
     failed: bool,
+    /// Consecutive seek failures. A seek can fail transiently (a player that
+    /// just ran dry, a format that needs a fresh decoder), so those drop the
+    /// player and reload rather than muting the track for the session; only
+    /// a run of them gives up.
+    seek_failures: u8,
 }
+
+/// Seek failures tolerated before a track is treated as undecodable.
+const MAX_SEEK_FAILURES: u8 = 3;
 
 impl MusicMix {
     /// Per-frame update while playing. `audio` is the session output; with
@@ -92,10 +100,17 @@ impl TrackPlayer {
             && let Err(e) = player.try_seek(Duration::from_nanos(src_ns))
         {
             log::warn!("music seek {}: {e}", track.file);
-            self.failed = true;
             player.pause();
+            self.seek_failures += 1;
+            if self.seek_failures >= MAX_SEEK_FAILURES {
+                self.failed = true;
+            } else {
+                // Retry from a fresh decoder on the next tick.
+                self.player = None;
+            }
             return;
         }
+        self.seek_failures = 0;
         player.set_volume(gain);
         player.play();
     }
