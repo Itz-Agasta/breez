@@ -1,0 +1,30 @@
+crates/core/src/wallpaper.rs
+  s_2d1e28c396f813::t_bbe454857919ae 1-45
+crates/app/src/theme.rs
+  s_2d1e28c396f813::t_9cfe283c1d6f40 49-59
+crates/app/src/ui/editor/canvas.rs
+  s_2d1e28c396f813::t_9e939ffb99f689 14,17,66-77,82-84,86,90,98,110-122,233-236,239,241
+  s_2d1e28c396f813::t_64f86c7b972f13 102,144,172
+crates/app/src/ui/editor/inspector/background.rs
+  s_2d1e28c396f813::t_7d22e1e43f4df5 20-23,26
+crates/core/src/layout.rs
+  s_2d1e28c396f813::t_d7fb4a3bd0d54d 1-215
+crates/core/src/lib.rs
+  s_2d1e28c396f813::t_129e0dc2646ffc 8,13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fa57551da9eb3f5ce24cd7b6464ecceb90af6a07",
+  "prompts": {},
+  "sessions": {
+    "s_2d1e28c396f813": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ab6c98f6-5567-41c5-a87e-4b29ae7f9902",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Itz-Agasta <rupamgolui69@gmail.com>"
+    }
+  }
+}
