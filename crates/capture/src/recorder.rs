@@ -425,7 +425,10 @@ impl<'a> AudioStream<'a> {
 
 fn interleave_f32(planes: &[Vec<u8>]) -> Vec<u8> {
     let channels = planes.len();
-    let plane_len = planes.first().map_or(0, Vec::len);
+    // Bound by the shortest plane: indexing every plane at the first one's
+    // length would panic the capture thread, and a panic there loses the
+    // whole take.
+    let plane_len = planes.iter().map(Vec::len).min().unwrap_or(0);
     let mut out = Vec::with_capacity(plane_len * channels);
     let mut offset = 0;
     while offset + 4 <= plane_len {
