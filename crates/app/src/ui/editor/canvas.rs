@@ -76,7 +76,7 @@ fn stage(ui: &mut Ui, state: &EditorState, session: &Session) {
         theme::color32(bottom),
     );
 
-    let Some(take) = session.project.takes.last() else {
+    let Some(take) = session.project.primary_take() else {
         return;
     };
     let out = layout::layout(style, from_egui(stage), take.width, take.height);

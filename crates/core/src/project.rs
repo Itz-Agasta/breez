@@ -171,6 +171,17 @@ pub struct MusicTrack {
     pub duration_ns: u64,
 }
 
+impl Project {
+    /// The take the timeline shows first. Preview geometry and export both
+    /// resolve it this way; reading `takes.first()` or `takes.last()`
+    /// instead lets the two disagree about frame size whenever a package
+    /// holds more takes than the timeline uses.
+    pub fn primary_take(&self) -> Option<&Take> {
+        let take_id = self.timeline.clips.first()?.take;
+        self.takes.iter().find(|take| take.id == take_id)
+    }
+}
+
 /// Valid style ranges (design-locked). UI controls and [`Style::clamp`]
 /// share these so a loaded project can never carry out-of-range values.
 pub const PADDING_RANGE: std::ops::RangeInclusive<u32> = 16..=140;

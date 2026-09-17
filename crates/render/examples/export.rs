@@ -7,12 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use breez_codec::{
-    AudioClip, ExportConfig, Exporter, MusicSource, SystemAudio, VideoDecoder, VideoFrame,
-};
+use breez_codec::{AudioClip, ExportConfig, Exporter, MusicSource, SequentialReader, SystemAudio};
 use breez_core::package::RecPackage;
 use breez_core::project::{Project, Timeline};
-use breez_core::render::{self, ZoomView};
+use breez_core::render::{self, ZoomView, audible_span_ns};
+use breez_core::timeline::{frame_count, frame_time_ns};
 use breez_core::{events, layout};
 use breez_render::{Compositor, FrameParams, SourceFrame};
 
@@ -32,8 +31,7 @@ fn main() -> Result<(), Error> {
 
     let fps = take.fps.max(1);
     let duration = project.timeline.duration_ns();
-    let per_frame = (1_000_000_000u64 / u64::from(fps)).max(1);
-    let total = duration.div_ceil(per_frame);
+    let total = frame_count(duration, fps);
     let (width, height) = layout::output_size(&project.style.ratio, short_side);
     println!(
         "{} -> {}: {width}x{height} @ {fps}fps, {total} frames ({:.2}s)",
@@ -56,20 +54,15 @@ fn main() -> Result<(), Error> {
     let clicks = click_events(&package, &project);
     let mut compositor = Compositor::new(width, height);
     let video = package.resolve(&take.video)?;
-    let mut decoder = VideoDecoder::open(&video, 0)?;
-    let mut last_pts_ns = 0u64;
+    let mut reader = SequentialReader::open(&video, 0)?;
 
     let started = std::time::Instant::now();
     for index in 0..total {
-        let t_ns = (index * 1_000_000_000 / u64::from(fps)).min(duration.saturating_sub(1));
+        let t_ns = frame_time_ns(index, fps).min(duration.saturating_sub(1));
         let Some(clip_time) = project.timeline.resolve(t_ns) else {
             break;
         };
-        if last_pts_ns > clip_time.src_ns {
-            decoder.seek(clip_time.src_ns)?;
-            last_pts_ns = 0;
-        }
-        let frame = next_at(&mut decoder, &mut last_pts_ns, clip_time.src_ns)?;
+        let frame = reader.frame_at(clip_time.src_ns)?;
         let zoom: ZoomView = render::zoom_at(
             &project.timeline,
             t_ns,
@@ -102,30 +95,11 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-/// Next frame at or after `src_ns`, tracking how far the decoder has walked.
-fn next_at(
-    decoder: &mut VideoDecoder,
-    last_pts_ns: &mut u64,
-    src_ns: u64,
-) -> Result<VideoFrame, Error> {
-    loop {
-        match decoder.next_frame()? {
-            Some(frame) => {
-                *last_pts_ns = frame.pts_ns;
-                if frame.pts_ns + 1 >= src_ns {
-                    return Ok(frame);
-                }
-            }
-            None => return Err("source ended before the timeline did".into()),
-        }
-    }
-}
-
 fn system_audio(package: &RecPackage, project: &Project) -> Option<SystemAudio> {
     let path = package
         .resolve(project.takes.first()?.audio.as_deref()?)
         .ok()?;
-    let clips = clip_slices(&project.timeline);
+    let clips = clip_slices(&project.timeline, project.takes.first()?.id);
     (!clips.is_empty()).then_some(SystemAudio {
         path,
         gain: project.style.system_audio_gain,
@@ -133,10 +107,11 @@ fn system_audio(package: &RecPackage, project: &Project) -> Option<SystemAudio> 
     })
 }
 
-fn clip_slices(timeline: &Timeline) -> Vec<AudioClip> {
+fn clip_slices(timeline: &Timeline, take_id: u32) -> Vec<AudioClip> {
     timeline
         .clips
         .iter()
+        .filter(|clip| clip.take == take_id)
         .map(|clip| AudioClip {
             src_in_ns: clip.src_in_ns,
             src_out_ns: clip.src_out_ns,
@@ -152,11 +127,7 @@ fn music(package: &RecPackage, project: &Project) -> Vec<MusicSource> {
         .music
         .iter()
         .filter_map(|track| {
-            let mut end = duration;
-            if track.duration_ns > 0 {
-                end = end.min(track.offset_ns.saturating_add(track.duration_ns));
-            }
-            let audible = end.saturating_sub(track.offset_ns);
+            let audible = audible_span_ns(track, duration);
             if audible == 0 {
                 return None;
             }

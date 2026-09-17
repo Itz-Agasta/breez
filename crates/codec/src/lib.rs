@@ -12,7 +12,7 @@ pub mod export;
 pub mod peaks;
 pub mod thumbs;
 
-pub use decoder::{VideoDecoder, VideoFrame};
+pub use decoder::{SequentialReader, VideoDecoder, VideoFrame};
 pub use encoder::{
     AudioEncoder, AudioEncoderConfig, PixelFormat, VideoEncoder, VideoEncoderConfig,
 };

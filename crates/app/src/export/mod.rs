@@ -14,12 +14,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
-use breez_codec::{ExportConfig, Exporter, VideoDecoder, VideoFrame};
+use breez_codec::{ExportConfig, Exporter, SequentialReader};
 use breez_core::events::InputEvent;
 use breez_core::layout;
 use breez_core::package::RecPackage;
 use breez_core::project::Project;
 use breez_core::render;
+use breez_core::timeline::{frame_count, frame_time_ns};
 use breez_render::{Compositor, FrameParams, SourceFrame};
 
 type JobError = Box<dyn std::error::Error + Send + Sync>;
@@ -106,9 +107,9 @@ impl ExportJob {
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let total = plan::frame_count(
+        let total = frame_count(
             project.timeline.duration_ns(),
-            project.takes.first().map_or(30, |take| take.fps),
+            project.primary_take().map_or(30, |take| take.fps),
         );
 
         let package = package.clone();
@@ -184,10 +185,14 @@ fn run(
     tx: &Sender<Progress>,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, JobError> {
-    let take = project.takes.first().ok_or("project has no takes")?;
+    let take = project
+        .primary_take()
+        .ok_or("timeline references no take")?;
+    let take_id = take.id;
+    let video = package.resolve(&take.video)?;
     let fps = take.fps.max(1);
     let duration = project.timeline.duration_ns();
-    let total = plan::frame_count(duration, fps);
+    let total = frame_count(duration, fps);
     if total == 0 {
         return Err("timeline is empty".into());
     }
@@ -209,110 +214,95 @@ fn run(
         },
     )?;
     let mut compositor = Compositor::new(width, height);
-    let mut decoder: Option<TakeDecoder> = None;
+    let mut reader = match SequentialReader::open(&video, 0) {
+        Ok(reader) => reader,
+        Err(e) => {
+            exporter.abort();
+            return Err(e.into());
+        }
+    };
 
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {
             exporter.abort();
             return Err("export cancelled".into());
         }
-        let t_ns = plan::frame_time_ns(index, fps).min(duration.saturating_sub(1));
-        let Some(clip_time) = project.timeline.resolve(t_ns) else {
-            break;
-        };
-        let frame = decode_at(
-            package,
+        // Any failure past this point must take the half-written file with
+        // it: the destination is a path the user picked, not a temp file.
+        match compose_frame(
+            &mut exporter,
+            &mut compositor,
+            &mut reader,
             project,
-            &mut decoder,
-            clip_time.take,
-            clip_time.src_ns,
-        )?;
-        let take_clicks = clicks.get(&clip_time.take).map_or(&[][..], Vec::as_slice);
-        let zoom = render::zoom_at(
-            &project.timeline,
-            t_ns,
-            render::cursor_anchor(take_clicks, clip_time.src_ns),
-        );
-        let ripples = render::ripples_at(take_clicks, clip_time.src_ns);
-        let composed = compositor.compose(
-            SourceFrame {
-                data: &frame.data,
-                width: frame.width,
-                height: frame.height,
-            },
-            &FrameParams {
-                style: &project.style,
-                zoom,
-                ripples: &ripples,
-                click_highlight: project.style.cursor.click_highlight,
-            },
-        );
-        exporter.push_frame(composed)?;
+            clicks,
+            take_id,
+            frame_time_ns(index, fps).min(duration.saturating_sub(1)),
+        ) {
+            Ok(()) => {}
+            Err(e) => {
+                exporter.abort();
+                return Err(e);
+            }
+        }
         let _ = tx.send(Progress {
             done: index + 1,
             total,
             finished: None,
         });
     }
-    exporter.finish()?;
+    exporter_finish(exporter, &settings.dest)?;
     Ok(settings.dest.clone())
 }
 
-/// The open decoder plus the source time it has already walked past, so a
-/// linear export never seeks.
-struct TakeDecoder {
-    take: u32,
-    decoder: VideoDecoder,
-    last_pts_ns: u64,
+/// Close the encoder, removing the half-written file if the trailer never
+/// lands.
+fn exporter_finish(exporter: Exporter, dest: &std::path::Path) -> Result<(), JobError> {
+    exporter.finish().map_err(|e| {
+        let _ = std::fs::remove_file(dest);
+        JobError::from(e)
+    })
 }
 
-/// Source frame at or after `src_ns`, reusing the open decoder while the walk
-/// stays forward. A backwards jump (a new clip trimming to an earlier point)
-/// seeks; export within one clip is monotonic, so that is rare.
-fn decode_at(
-    package: &RecPackage,
+/// Decode, composite and push the frame shown at timeline time `t_ns`.
+fn compose_frame(
+    exporter: &mut Exporter,
+    compositor: &mut Compositor,
+    reader: &mut SequentialReader,
     project: &Project,
-    slot: &mut Option<TakeDecoder>,
+    clicks: &HashMap<u32, Vec<InputEvent>>,
     take_id: u32,
-    src_ns: u64,
-) -> Result<VideoFrame, JobError> {
-    let stale = match slot {
-        Some(open) => open.take != take_id || open.last_pts_ns > src_ns,
-        None => true,
-    };
-    if stale {
-        match slot {
-            // Same take, just rewound: seek rather than respawn.
-            Some(open) if open.take == take_id => {
-                open.decoder.seek(src_ns)?;
-                open.last_pts_ns = 0;
-            }
-            _ => {
-                let take = project
-                    .takes
-                    .iter()
-                    .find(|take| take.id == take_id)
-                    .ok_or("clip references a missing take")?;
-                let path = package.resolve(&take.video)?;
-                *slot = Some(TakeDecoder {
-                    take: take_id,
-                    decoder: VideoDecoder::open(&path, src_ns)?,
-                    last_pts_ns: 0,
-                });
-            }
-        }
+    t_ns: u64,
+) -> Result<(), JobError> {
+    let clip_time = project
+        .timeline
+        .resolve(t_ns)
+        .ok_or("timeline resolved past its own end")?;
+    // One export renders one take; a clip pointing elsewhere would decode
+    // from the wrong file.
+    if clip_time.take != take_id {
+        return Err("timeline spans more than one take, which export cannot do yet".into());
     }
-
-    let open = slot.as_mut().ok_or("decoder unavailable")?;
-    loop {
-        match open.decoder.next_frame()? {
-            Some(frame) => {
-                open.last_pts_ns = frame.pts_ns;
-                if frame.pts_ns + 1 >= src_ns {
-                    return Ok(frame);
-                }
-            }
-            None => return Err("source ended before the timeline did".into()),
-        }
-    }
+    let frame = reader.frame_at(clip_time.src_ns)?;
+    let take_clicks = clicks.get(&take_id).map_or(&[][..], Vec::as_slice);
+    let zoom = render::zoom_at(
+        &project.timeline,
+        t_ns,
+        render::cursor_anchor(take_clicks, clip_time.src_ns),
+    );
+    let ripples = render::ripples_at(take_clicks, clip_time.src_ns);
+    let composed = compositor.compose(
+        SourceFrame {
+            data: &frame.data,
+            width: frame.width,
+            height: frame.height,
+        },
+        &FrameParams {
+            style: &project.style,
+            zoom,
+            ripples: &ripples,
+            click_highlight: project.style.cursor.click_highlight,
+        },
+    );
+    exporter.push_frame(composed)?;
+    Ok(())
 }

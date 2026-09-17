@@ -102,14 +102,11 @@ pub fn cursor_anchor(clicks: &[InputEvent], src_ns: u64) -> Option<[f32; 2]> {
 /// and export both apply this, so the mix cannot differ between them.
 pub fn music_gain_at(track: &MusicTrack, t_ns: u64, timeline_duration_ns: u64) -> f32 {
     let start = track.offset_ns;
-    let mut end = timeline_duration_ns;
-    if track.duration_ns > 0 {
-        end = end.min(start.saturating_add(track.duration_ns));
-    }
-    if t_ns < start || t_ns >= end {
+    let span = audible_span_ns(track, timeline_duration_ns);
+    let end = start.saturating_add(span);
+    if span == 0 || t_ns < start || t_ns >= end {
         return 0.0;
     }
-    let span = end - start;
     let mut gain = track.gain;
     let fade_in = track.fade_in_ns.min(span);
     if fade_in > 0 {
@@ -120,6 +117,18 @@ pub fn music_gain_at(track: &MusicTrack, t_ns: u64, timeline_duration_ns: u64) -
         gain *= ((end - t_ns) as f32 / fade_out as f32).min(1.0);
     }
     gain
+}
+
+/// Length of a track's audible span, measured from its offset: it ends at
+/// the media end when that is known, or at the timeline end, whichever comes
+/// first. The export builds its fade anchors from this too, so the preview
+/// mix and the exported mix cannot disagree about where the fades sit.
+pub fn audible_span_ns(track: &MusicTrack, timeline_duration_ns: u64) -> u64 {
+    let mut end = timeline_duration_ns;
+    if track.duration_ns > 0 {
+        end = end.min(track.offset_ns.saturating_add(track.duration_ns));
+    }
+    end.saturating_sub(track.offset_ns)
 }
 
 /// One expanding click ripple: normalized position and 0..1 age.

@@ -63,6 +63,25 @@ impl Timeline {
     }
 }
 
+/// Output frames needed to cover `duration_ns` at `fps`, rounding a partial
+/// final frame up so the last moment is not cut off.
+///
+/// Multiplying before dividing matters: a nanoseconds-per-frame value
+/// truncates (1e9/30 is 33_333_333, not 33_333_333.33), and dividing a whole
+/// duration by the short value rounds up into a frame the source does not
+/// have.
+pub fn frame_count(duration_ns: u64, fps: u32) -> u64 {
+    if duration_ns == 0 || fps == 0 {
+        return 0;
+    }
+    (duration_ns.saturating_mul(u64::from(fps))).div_ceil(1_000_000_000)
+}
+
+/// Timeline time sampled by output frame `index`.
+pub fn frame_time_ns(index: u64, fps: u32) -> u64 {
+    index.saturating_mul(1_000_000_000) / u64::from(fps.max(1))
+}
+
 fn clip_len_ns(clip: &crate::project::Clip) -> u64 {
     let src = clip.src_out_ns.saturating_sub(clip.src_in_ns);
     (src as f64 / f64::from(clip.speed.max(f32::EPSILON))) as u64
@@ -119,6 +138,44 @@ mod tests {
         // Trimmed away or unknown source positions map to nothing.
         assert_eq!(timeline.timeline_ns_for(0, 500), None);
         assert_eq!(timeline.timeline_ns_for(7, 0), None);
+    }
+
+    #[test]
+    fn frame_count_should_not_exceed_the_frames_the_source_has() {
+        // A 10s 30fps take holds frames 0..=299. Asking for 301 walks the
+        // decoder off the end and fails the whole export.
+        assert_eq!(frame_count(10_000_000_000, 30), 300);
+        assert_eq!(frame_count(10_000_000_000, 60), 600);
+    }
+
+    #[test]
+    fn frame_count_should_round_up_a_partial_final_frame() {
+        // 2.02s at 30fps is 60.6 frames.
+        assert_eq!(frame_count(2_020_000_000, 30), 61);
+    }
+
+    #[test]
+    fn frame_count_should_be_zero_for_an_empty_timeline() {
+        assert_eq!(frame_count(0, 30), 0);
+    }
+
+    #[test]
+    fn every_frame_time_should_land_inside_the_duration() {
+        for fps in [24, 25, 30, 50, 60] {
+            for duration_ns in [1_000_000_000, 10_000_000_000, 8_333_333_333] {
+                let count = frame_count(duration_ns, fps);
+                assert!(
+                    frame_time_ns(count - 1, fps) < duration_ns,
+                    "last frame of {duration_ns}ns at {fps}fps falls outside it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frame_time_should_land_on_exact_frame_boundaries() {
+        assert_eq!(frame_time_ns(0, 30), 0);
+        assert_eq!(frame_time_ns(30, 30), 1_000_000_000);
     }
 
     #[test]
