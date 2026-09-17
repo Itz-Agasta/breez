@@ -96,6 +96,7 @@ pub struct ExportJob {
     rx: Receiver<Progress>,
     cancel: Arc<AtomicBool>,
     latest: Progress,
+    dest: PathBuf,
 }
 
 impl ExportJob {
@@ -107,6 +108,7 @@ impl ExportJob {
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        let dest = settings.dest.clone();
         let total = frame_count(
             project.timeline.duration_ns(),
             project.primary_take().map_or(30, |take| take.fps),
@@ -150,6 +152,7 @@ impl ExportJob {
                 total,
                 finished: None,
             },
+            dest,
         }
     }
 
@@ -165,7 +168,18 @@ impl ExportJob {
                         return self.latest.clone();
                     }
                 }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                Err(TryRecvError::Empty) => return self.latest.clone(),
+                // The worker sends a terminal Progress on every path it
+                // returns from, so a disconnect without one means it
+                // panicked. Reporting that is what lets the dialog leave the
+                // progress view at all: its only Close button lives in the
+                // settings view, which is gated on the job being finished.
+                Err(TryRecvError::Disconnected) => {
+                    if self.latest.finished.is_none() {
+                        let _ = std::fs::remove_file(&self.dest);
+                        self.latest.finished =
+                            Some(Err("the export worker stopped unexpectedly".to_owned()));
+                    }
                     return self.latest.clone();
                 }
             }

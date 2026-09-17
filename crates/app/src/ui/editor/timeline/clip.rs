@@ -39,9 +39,13 @@ pub(super) fn show(
         .clips
         .iter()
         .enumerate()
-        .map(|(index, clip)| {
+        .map(|(index, _)| {
             let start = timeline.clip_start_ns(index);
-            let len = clip.src_out_ns.saturating_sub(clip.src_in_ns);
+            // Timeline length, not source length: `clip_start_ns` already
+            // divides by speed, so using the raw source span would paint a
+            // 2x clip at twice its real width, overlapping the next clip and
+            // putting both trim handles at the wrong x.
+            let len = timeline.clip_len_ns(index);
             let body = Rect::from_min_max(
                 pos2(track.x_at(start), lane.min.y + 7.0),
                 pos2(track.x_at(start + len), lane.max.y - 7.0),

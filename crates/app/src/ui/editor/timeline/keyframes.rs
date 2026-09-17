@@ -246,12 +246,23 @@ fn apply_drag(session: &mut Session, drag: &ZoomDrag, pointer_x: f32, ns_per_px:
     match drag.part {
         DragPart::Body => {
             let len = drag.start_out_ns - drag.start_in_ns;
-            segment.in_ns = super::clamp_ns(
+            let in_ns = super::clamp_ns(
                 shifted(drag.start_in_ns),
                 prev_end,
                 next_start.saturating_sub(len),
             );
-            segment.out_ns = segment.in_ns + len;
+            // The gap between neighbours can be shorter than the segment
+            // (a trim shortened the timeline), in which case clamping the
+            // start alone would push the end past the next segment. That
+            // breaks the non-overlapping invariant the renderers rely on,
+            // and `sanitize_zoom` would drop the segment on the next load
+            // with nothing shown to the user. Clamp the end too, and leave
+            // the segment alone when there is no room at all.
+            let out_ns = (in_ns + len).min(next_start);
+            if out_ns > in_ns {
+                segment.in_ns = in_ns;
+                segment.out_ns = out_ns;
+            }
         }
         DragPart::Left => {
             segment.in_ns = super::clamp_ns(

@@ -26,6 +26,13 @@ impl Timeline {
         self.clips.iter().take(index).map(clip_len_ns).sum()
     }
 
+    /// Timeline time clip `index` occupies, which is its source span scaled
+    /// by its speed. Drawing or hit-testing a clip against its raw source
+    /// span misplaces every clip after it.
+    pub fn clip_len_ns(&self, index: usize) -> u64 {
+        self.clips.get(index).map_or(0, clip_len_ns)
+    }
+
     /// Inverse of [`Timeline::resolve`] for one take: the timeline time at
     /// which source position `src_ns` of `take` is shown, if any clip covers
     /// it (the first one wins when several do).
@@ -176,6 +183,22 @@ mod tests {
     fn frame_time_should_land_on_exact_frame_boundaries() {
         assert_eq!(frame_time_ns(0, 30), 0);
         assert_eq!(frame_time_ns(30, 30), 1_000_000_000);
+    }
+
+    #[test]
+    fn clip_len_should_scale_with_speed() {
+        let timeline = Timeline {
+            clips: vec![Clip {
+                take: 0,
+                src_in_ns: 0,
+                src_out_ns: 4_000,
+                speed: 2.0,
+            }],
+            ..Timeline::default()
+        };
+        // 4us of source at 2x occupies 2us of timeline.
+        assert_eq!(timeline.clip_len_ns(0), 2_000);
+        assert_eq!(timeline.clip_len_ns(9), 0);
     }
 
     #[test]
