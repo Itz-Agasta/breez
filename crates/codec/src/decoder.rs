@@ -60,7 +60,11 @@ impl VideoDecoder {
 /// final frame instead of failing the whole export.
 pub struct SequentialReader {
     decoder: VideoDecoder,
+    /// Newest frame at or before the last requested time.
     last: Option<VideoFrame>,
+    /// A frame decoded past the last requested time, held for a later call
+    /// rather than thrown away.
+    pending: Option<VideoFrame>,
 }
 
 impl SequentialReader {
@@ -68,28 +72,47 @@ impl SequentialReader {
         Ok(Self {
             decoder: VideoDecoder::open(path, start_ns)?,
             last: None,
+            pending: None,
         })
     }
 
-    /// Frame covering source time `src_ns`. Seeks only when `src_ns` falls
-    /// behind where the walk has already reached.
+    /// The frame on screen at source time `src_ns`: the newest one whose
+    /// presentation time is at or before it.
+    ///
+    /// Returning the next frame instead shifts the whole export forward by
+    /// up to one source frame whenever a clip is trimmed off a frame
+    /// boundary, because then no requested time lands on one.
+    ///
+    /// Seeks only when `src_ns` falls behind where the walk has reached.
     pub fn frame_at(&mut self, src_ns: u64) -> Result<VideoFrame, CodecError> {
         if self.last.as_ref().is_some_and(|f| f.pts_ns > src_ns) {
             self.decoder.seek(src_ns)?;
             self.last = None;
+            self.pending = None;
         }
         loop {
-            if let Some(frame) = self.last.as_ref().filter(|f| f.pts_ns + 1 >= src_ns) {
-                return Ok(frame.clone());
+            // A frame held back by an earlier call may be due now.
+            if let Some(next) = &self.pending {
+                if next.pts_ns > src_ns {
+                    break;
+                }
+                self.last = self.pending.take();
+                continue;
             }
             match self.decoder.next_frame()? {
-                Some(frame) => self.last = Some(frame),
-                None => {
-                    return self.last.clone().ok_or_else(|| {
-                        CodecError::BadInput("no decodable frames in source".to_owned())
-                    });
-                }
+                Some(frame) if frame.pts_ns <= src_ns => self.last = Some(frame),
+                // Overshot: this frame belongs to a later output frame.
+                Some(frame) => self.pending = Some(frame),
+                // End of stream: a take whose declared duration runs past
+                // its last decodable frame holds on that frame.
+                None => break,
             }
         }
+        // Before the first frame (a seek can land late) the earliest frame
+        // available is the best answer.
+        self.last
+            .clone()
+            .or_else(|| self.pending.clone())
+            .ok_or_else(|| CodecError::BadInput("no decodable frames in source".to_owned()))
     }
 }
