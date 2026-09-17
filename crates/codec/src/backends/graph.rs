@@ -96,8 +96,18 @@ fn clip_filters(clip: &AudioClip) -> String {
         secs(clip.src_out_ns)
     );
     // atempo only accepts 0.5..=2.0 per instance, so wider ratios chain.
-    let mut remaining = clip.speed.clamp(0.25, 4.0);
-    while (remaining - 1.0).abs() > 1e-4 {
+    // The speed itself is already clamped by `Project::sanitize`, which is
+    // what keeps the audio rate equal to the video rate; the bound here only
+    // stops a non-finite value spinning forever.
+    let mut remaining = if clip.speed.is_finite() && clip.speed > 0.0 {
+        clip.speed
+    } else {
+        1.0
+    };
+    for _ in 0..8 {
+        if (remaining - 1.0).abs() <= 1e-4 {
+            break;
+        }
         let step = remaining.clamp(0.5, 2.0);
         filters.push_str(&format!(",atempo={step:.6}"));
         remaining /= step;

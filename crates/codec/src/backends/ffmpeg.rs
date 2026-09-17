@@ -30,6 +30,14 @@ pub(crate) fn ensure_available() -> Result<(), CodecError> {
 pub(crate) struct FfmpegSink {
     child: FfmpegChild,
     stdin: Option<ChildStdin>,
+    /// Drains ffmpeg's stderr for the life of the process.
+    ///
+    /// `FfmpegCommand` pipes stderr whether or not anyone reads it. Nothing
+    /// here does, so on a damaged input ffmpeg can fill the ~64KB pipe
+    /// buffer, block on the write, and never exit - leaving `wait()` below
+    /// blocked for good and, on the export path, the worker thread hung at
+    /// 100% with Cancel already out of the loop that polls it.
+    stderr: Option<std::thread::JoinHandle<String>>,
 }
 
 impl FfmpegSink {
@@ -111,10 +119,20 @@ impl FfmpegSink {
         let stdin = child
             .take_stdin()
             .ok_or_else(|| CodecError::Backend("ffmpeg stdin unavailable".to_owned()))?;
+        let stderr = child.take_stderr().map(drain_stderr);
         Ok(Self {
             child,
             stdin: Some(stdin),
+            stderr,
         })
+    }
+
+    /// Whatever ffmpeg logged, once it has exited.
+    fn stderr_text(&mut self) -> String {
+        self.stderr
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
     }
 
     pub(crate) fn write(&mut self, data: &[u8]) -> Result<(), CodecError> {
@@ -134,7 +152,11 @@ impl FfmpegSink {
         if status.success() {
             Ok(())
         } else {
-            Err(CodecError::Backend(format!("ffmpeg exited with {status}")))
+            let detail = self.stderr_text();
+            Err(CodecError::Backend(format!(
+                "ffmpeg exited with {status}: {}",
+                detail.trim()
+            )))
         }
     }
 }
@@ -204,6 +226,18 @@ pub(crate) fn spawn_export(dest: &Path, config: &ExportConfig) -> Result<FfmpegS
     ]);
     cmd.arg(dest);
     FfmpegSink::spawn(cmd)
+}
+
+/// Read a child's stderr to EOF on its own thread, so the pipe can never
+/// fill and block the child.
+fn drain_stderr<R: std::io::Read + Send + 'static>(
+    mut stderr: R,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    })
 }
 
 /// One decode process streaming RGBA frames from `start_ns` onward. Seeking
@@ -298,6 +332,9 @@ pub(crate) fn run_peaks(
     let stdout = child
         .take_stdout()
         .ok_or_else(|| CodecError::Backend("ffmpeg stdout unavailable".to_owned()))?;
+    // Drained alongside stdout: reading it only after `wait()` deadlocks if
+    // ffmpeg fills the stderr pipe while we are still reading samples.
+    let stderr = child.take_stderr().map(drain_stderr);
 
     let bucket_len = (SAMPLE_RATE / peaks_per_sec.max(1)).max(1) as u64;
     let mut peaks = Vec::new();
@@ -318,18 +355,13 @@ pub(crate) fn run_peaks(
     }
 
     let status = child.wait()?;
+    let detail = stderr
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
     if !status.success() || samples == 0 {
-        // stderr is small under -loglevel error; safe to read after exit.
-        let detail = child
-            .take_stderr()
-            .map(|mut err| {
-                let mut s = String::new();
-                let _ = std::io::Read::read_to_string(&mut err, &mut s);
-                s.trim().to_owned()
-            })
-            .unwrap_or_default();
         return Err(CodecError::Backend(format!(
-            "peaks decode failed ({status}): {detail}"
+            "peaks decode failed ({status}): {}",
+            detail.trim()
         )));
     }
     Ok(crate::peaks::AudioPeaks {

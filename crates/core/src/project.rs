@@ -60,6 +60,7 @@ impl Project {
             if !(clip.speed.is_finite() && clip.speed > 0.0) {
                 clip.speed = 1.0;
             }
+            clip.speed = clip.speed.clamp(*SPEED_RANGE.start(), *SPEED_RANGE.end());
             clip.src_in_ns < clip.src_out_ns
         });
         self.sanitize_zoom();
@@ -197,6 +198,10 @@ pub const RADIUS_RANGE: std::ops::RangeInclusive<u32> = 0..=28;
 pub const SHADOW_RANGE: std::ops::RangeInclusive<u32> = 0..=100;
 pub const GAIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 pub const ZOOM_LEVEL_RANGE: std::ops::RangeInclusive<f32> = 1.0..=3.0;
+/// Clip playback speed. The export's `atempo` chain covers this range, and
+/// video timing reads the same clamped value, so the two cannot drift apart
+/// on a hand-edited project.
+pub const SPEED_RANGE: std::ops::RangeInclusive<f32> = 0.25..=4.0;
 /// Output aspect ratios the editor offers; `style.ratio` must be one of these.
 pub const RATIOS: &[&str] = &["16:9", "9:16", "1:1"];
 
@@ -269,6 +274,32 @@ impl Default for CursorStyle {
 mod tests {
     use super::*;
     use crate::package::RecPackage;
+
+    #[test]
+    fn sanitize_should_clamp_clip_speed_into_the_exportable_range() {
+        // Video timing honours any positive speed but the audio atempo chain
+        // covers 0.25..4.0, so an unclamped 6x would export picture and
+        // sound at different rates.
+        let mut project = Project::new("t");
+        project.takes.push(Take {
+            id: 0,
+            video: "v".to_owned(),
+            audio: None,
+            events: None,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            duration_ns: 10_000_000_000,
+        });
+        project.timeline.clips = vec![Clip {
+            take: 0,
+            src_in_ns: 0,
+            src_out_ns: 1_000_000_000,
+            speed: 6.0,
+        }];
+        project.sanitize();
+        assert_eq!(project.timeline.clips[0].speed, 4.0);
+    }
 
     #[test]
     fn sanitize_should_floor_take_fps_at_one() {
