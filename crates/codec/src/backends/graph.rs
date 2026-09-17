@@ -20,13 +20,23 @@ fn secs(ns: u64) -> String {
     format!("{:.6}", ns as f64 / 1e9)
 }
 
+/// The system audio input this export actually has, if any.
+///
+/// A `SystemAudio` with no clips selects nothing, so it contributes no input
+/// at all. `spawn_export` and [`filter_graph`] must agree on that or the
+/// music chains would be numbered against an input that was never opened and
+/// would read the wrong file.
+pub(crate) fn effective_system(config: &ExportConfig) -> Option<&SystemAudio> {
+    config
+        .system_audio
+        .as_ref()
+        .filter(|system| !system.clips.is_empty())
+}
+
 /// Build the `-filter_complex` value, or `None` when the export has no audio
 /// at all. The mixed result is always labelled `[aout]`.
 pub(crate) fn filter_graph(config: &ExportConfig) -> Option<String> {
-    let system = config
-        .system_audio
-        .as_ref()
-        .filter(|system| !system.clips.is_empty());
+    let system = effective_system(config);
     if system.is_none() && config.music.is_empty() {
         return None;
     }
@@ -176,6 +186,23 @@ mod tests {
     #[test]
     fn graph_should_be_empty_without_any_audio() {
         assert_eq!(filter_graph(&config(None, Vec::new())), None);
+    }
+
+    #[test]
+    fn effective_system_should_drop_a_source_that_selects_no_clips() {
+        assert!(effective_system(&config(Some(system(Vec::new())), Vec::new())).is_none());
+        assert!(effective_system(&config(Some(system(vec![clip(0, 1)])), Vec::new())).is_some());
+    }
+
+    #[test]
+    fn music_should_be_numbered_against_the_inputs_that_are_actually_opened() {
+        // No usable system audio means the lone music track is input 1.
+        let g = filter_graph(&config(
+            Some(system(Vec::new())),
+            vec![music(0, 1_000_000_000)],
+        ))
+        .expect("graph");
+        assert!(g.starts_with("[1:a]"));
     }
 
     #[test]

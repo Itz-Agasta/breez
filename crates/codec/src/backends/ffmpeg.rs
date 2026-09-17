@@ -171,7 +171,8 @@ pub(crate) fn spawn_export(dest: &Path, config: &ExportConfig) -> Result<FfmpegS
         "-i",
         "pipe:0",
     ]);
-    if let Some(system) = &config.system_audio {
+    // Same decision the filter graph makes, so input indices cannot desync.
+    if let Some(system) = graph::effective_system(config) {
         cmd.arg("-i");
         cmd.arg(&system.path);
     }

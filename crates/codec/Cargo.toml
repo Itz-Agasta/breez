@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-breez-core.workspace = true
 ffmpeg-sidecar.workspace = true
 serde.workspace = true
 serde_json.workspace = true

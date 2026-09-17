@@ -648,7 +648,6 @@ dependencies = [
 name = "breez-codec"
 version = "0.1.0"
 dependencies = [
- "breez-core",
  "ffmpeg-sidecar",
  "log",
  "serde",
