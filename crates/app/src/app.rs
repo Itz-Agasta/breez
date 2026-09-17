@@ -12,6 +12,7 @@ use breez_core::project::Project;
 use eframe::egui;
 
 use crate::theme;
+use crate::ui::editor::export_dialog;
 use crate::ui::editor::{self, EditorAction, EditorState};
 use crate::ui::record::{self, RecordAction, RecordState};
 use crate::ui::titlebar::{self, TitlebarAction, TitlebarState};
@@ -47,6 +48,7 @@ pub struct BreezApp {
     flow: RecordFlow,
     session: Option<Session>,
     editor: Option<EditorState>,
+    export: export_dialog::State,
     error: Option<String>,
 }
 
@@ -58,6 +60,7 @@ impl BreezApp {
             flow: RecordFlow::Idle,
             session: None,
             editor: None,
+            export: export_dialog::State::default(),
             error: None,
         }
     }
@@ -193,13 +196,22 @@ impl eframe::App for BreezApp {
             can_edit: self.session.is_some(),
             busy: !matches!(self.flow, RecordFlow::Idle),
         };
-        if let Some(TitlebarAction::SetMode(mode)) = titlebar::show(ui, &titlebar_state) {
-            if mode == Mode::Record
-                && let Some(editor) = &mut self.editor
-            {
-                editor.player.pause();
+        match titlebar::show(ui, &titlebar_state) {
+            Some(TitlebarAction::SetMode(mode)) => {
+                if mode == Mode::Record
+                    && let Some(editor) = &mut self.editor
+                {
+                    editor.player.pause();
+                }
+                self.mode = mode;
             }
-            self.mode = mode;
+            Some(TitlebarAction::Export) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.player.pause();
+                }
+                self.export.open();
+            }
+            None => {}
         }
 
         match self.mode {
@@ -226,6 +238,9 @@ impl eframe::App for BreezApp {
                 }
                 _ => self.mode = Mode::Record,
             },
+        }
+        if let (Some(session), Some(editor)) = (&self.session, &self.editor) {
+            self.export.show(ui.ctx(), session, editor.clicks());
         }
         self.autosave(ui.ctx());
     }

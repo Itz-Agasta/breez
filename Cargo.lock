@@ -619,6 +619,7 @@ dependencies = [
  "breez-capture",
  "breez-codec",
  "breez-core",
+ "breez-render",
  "crossbeam-channel",
  "eframe",
  "egui",
@@ -669,6 +670,7 @@ dependencies = [
 name = "breez-render"
 version = "0.1.0"
 dependencies = [
+ "breez-codec",
  "breez-core",
  "image",
  "rayon",

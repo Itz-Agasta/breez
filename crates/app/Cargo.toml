@@ -9,6 +9,7 @@ license.workspace = true
 breez-capture.workspace = true
 breez-codec.workspace = true
 breez-core.workspace = true
+breez-render.workspace = true
 crossbeam-channel.workspace = true
 eframe.workspace = true
 egui.workspace = true

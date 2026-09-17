@@ -3,6 +3,7 @@
 //! state, including the playback player and filmstrip thumbnails.
 
 mod canvas;
+pub mod export_dialog;
 mod inspector;
 mod timeline;
 mod toolpanel;
@@ -89,6 +90,14 @@ impl EditorState {
             cursor_open: false,
             audio_open: false,
         }
+    }
+}
+
+impl EditorState {
+    /// Button-down events per take, for anything outside the editor that
+    /// needs the same zoom anchors and ripples the preview uses.
+    pub fn clicks(&self) -> &HashMap<u32, Vec<InputEvent>> {
+        &self.clicks
     }
 }
 
