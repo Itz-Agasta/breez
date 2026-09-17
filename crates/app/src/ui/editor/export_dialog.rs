@@ -84,10 +84,11 @@ impl State {
         let labels: Vec<Segment> = PRESETS.iter().map(|p| Segment::new(p.label())).collect();
         widgets::segmented::segmented(ui, &mut self.preset, &labels, 28.0);
 
+        // The take export will actually render, not takes.first(): a package
+        // can hold takes the timeline never uses.
         let take_height = session
             .project
-            .takes
-            .first()
+            .primary_take()
             .map_or(1080, |take| take.height);
         let (width, height) = layout::output_size(
             &session.project.style.ratio,

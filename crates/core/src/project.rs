@@ -42,6 +42,14 @@ impl Project {
     /// export) never see out-of-range data.
     pub fn sanitize(&mut self) {
         self.style.clamp();
+        // Takes come from disk like everything else here. fps in particular
+        // is a divisor all over playback and export, so a zero would panic
+        // the UI thread the first time a frame is presented.
+        for take in &mut self.takes {
+            take.fps = take.fps.max(1);
+            take.width = take.width.max(1);
+            take.height = take.height.max(1);
+        }
         let takes = &self.takes;
         self.timeline.clips.retain_mut(|clip| {
             let Some(take) = takes.iter().find(|t| t.id == clip.take) else {
@@ -261,6 +269,25 @@ impl Default for CursorStyle {
 mod tests {
     use super::*;
     use crate::package::RecPackage;
+
+    #[test]
+    fn sanitize_should_floor_take_fps_at_one() {
+        // A zero here is a division by zero in playback's frame pacing.
+        let mut project = Project::new("t");
+        project.takes.push(Take {
+            id: 0,
+            video: "v".to_owned(),
+            audio: None,
+            events: None,
+            width: 0,
+            height: 0,
+            fps: 0,
+            duration_ns: 1_000_000_000,
+        });
+        project.sanitize();
+        assert_eq!(project.takes[0].fps, 1);
+        assert_eq!((project.takes[0].width, project.takes[0].height), (1, 1));
+    }
 
     #[test]
     fn save_then_load_preserves_takes_and_timeline() {
