@@ -7,3 +7,7 @@ license.workspace = true
 
 [dependencies]
 breez-core.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+image.workspace = true
