@@ -150,9 +150,16 @@ fn run_capture(
         while !stop.load(Ordering::Relaxed) {
             match session.next_event(Some(Duration::from_millis(100))) {
                 Ok(CaptureEvent::Video(frame)) => {
-                    video.push(&frame)?;
+                    // Anchored before the push, not after: on the first
+                    // frame `push` spawns ffmpeg and then blocks writing a
+                    // whole RGBA frame (14.7MB at 1440p) through a 64KB
+                    // pipe. Taking the instant afterwards folded all of that
+                    // startup latency into every event timestamp in the
+                    // take, so clicks rendered that far after the pixels
+                    // they belong to.
                     anchor.get_or_init(Instant::now);
                     display_size.get_or_init(|| (frame.width, frame.height));
+                    video.push(&frame)?;
                 }
                 Ok(CaptureEvent::Audio(frame)) => audio.push(&frame, video.anchor_ns())?,
                 Ok(CaptureEvent::Gap(gap)) => {
@@ -346,6 +353,11 @@ struct AudioStream<'a> {
 }
 
 const AUDIO_GAP_TOLERANCE_NS: i64 = 20_000_000;
+/// Longest dropout worth filling with silence. Real gaps are far shorter;
+/// anything past this is a clock anomaly (backend restart, suspend), and
+/// writing it out would push gigabytes of zeros through the encoder while
+/// the recording appears frozen. Past the cap the stream resyncs instead.
+const MAX_SILENCE_NS: i64 = 30_000_000_000;
 
 impl<'a> AudioStream<'a> {
     fn new(package: &'a RecPackage, take_id: u32) -> Self {
@@ -434,7 +446,12 @@ impl<'a> AudioStream<'a> {
         };
         if let Some(expected) = self.expected_ns.or(Some(anchor_ns)) {
             let gap_ns = start_ns - expected;
-            if gap_ns > tolerance {
+            if gap_ns > MAX_SILENCE_NS {
+                log::warn!(
+                    "audio timestamp jumped {:.1}s; resyncing instead of padding",
+                    gap_ns as f64 / 1e9
+                );
+            } else if gap_ns > tolerance {
                 let mut silence_bytes =
                     (gap_ns as i128 * bytes_per_second as i128 / 1_000_000_000) as usize;
                 silence_bytes -= silence_bytes % (self.channels as usize * 4);
