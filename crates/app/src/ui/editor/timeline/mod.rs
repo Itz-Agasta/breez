@@ -17,6 +17,18 @@ use super::EditorState;
 use crate::app::Session;
 use crate::theme;
 
+/// Clamp into `lo..=hi`, tolerating an inverted range.
+///
+/// `u64::clamp` panics when `lo > hi`, and the drag handlers build their
+/// bounds from timeline state that a trim can invalidate: shortening the
+/// clip can leave a zoom segment ending past the timeline, or a clip shorter
+/// than the minimum length. `sanitize` only restores those invariants at
+/// load, so the bound has to survive the inverted case rather than assume it
+/// away. Collapsing to `lo` keeps the dragged edge against its neighbour.
+pub(super) fn clamp_ns(value: u64, lo: u64, hi: u64) -> u64 {
+    value.clamp(lo, hi.max(lo))
+}
+
 /// Pixel <-> timeline-time mapping for the lane/ruler track area.
 #[derive(Clone, Copy)]
 pub(super) struct Track {
@@ -93,5 +105,23 @@ pub(super) fn seek_interaction(
     if (response.drag_stopped() || response.clicked()) && state.resume_after_scrub {
         state.resume_after_scrub = false;
         state.player.play(session);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_ns;
+
+    #[test]
+    fn clamp_ns_should_behave_like_clamp_for_a_valid_range() {
+        assert_eq!(clamp_ns(5, 0, 10), 5);
+        assert_eq!(clamp_ns(20, 0, 10), 10);
+        assert_eq!(clamp_ns(0, 3, 10), 3);
+    }
+
+    #[test]
+    fn clamp_ns_should_collapse_to_the_low_bound_when_the_range_is_inverted() {
+        // A zoom segment left ending past a trimmed timeline produces this.
+        assert_eq!(clamp_ns(7, 5_200_000_000, 5_100_000_000), 5_200_000_000);
     }
 }

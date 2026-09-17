@@ -172,8 +172,11 @@ fn apply_trim(session: &mut Session, drag: &TrimDrag, pointer_x: f32) {
     let delta_ns = f64::from(pointer_x - drag.start_x) * drag.ns_per_px;
     let target = (drag.start_src_ns as f64 + delta_ns).max(0.0) as u64;
     if drag.right {
-        clip.src_out_ns =
-            target.clamp(clip.src_in_ns.saturating_add(MIN_CLIP_NS), take.duration_ns);
+        clip.src_out_ns = super::clamp_ns(
+            target,
+            clip.src_in_ns.saturating_add(MIN_CLIP_NS),
+            take.duration_ns,
+        );
     } else {
         clip.src_in_ns = target.min(clip.src_out_ns.saturating_sub(MIN_CLIP_NS));
     }

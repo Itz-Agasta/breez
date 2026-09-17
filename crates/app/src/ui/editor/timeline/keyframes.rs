@@ -246,17 +246,26 @@ fn apply_drag(session: &mut Session, drag: &ZoomDrag, pointer_x: f32, ns_per_px:
     match drag.part {
         DragPart::Body => {
             let len = drag.start_out_ns - drag.start_in_ns;
-            segment.in_ns =
-                shifted(drag.start_in_ns).clamp(prev_end, next_start.saturating_sub(len));
+            segment.in_ns = super::clamp_ns(
+                shifted(drag.start_in_ns),
+                prev_end,
+                next_start.saturating_sub(len),
+            );
             segment.out_ns = segment.in_ns + len;
         }
         DragPart::Left => {
-            segment.in_ns = shifted(drag.start_in_ns)
-                .clamp(prev_end, segment.out_ns.saturating_sub(MIN_SEGMENT_NS));
+            segment.in_ns = super::clamp_ns(
+                shifted(drag.start_in_ns),
+                prev_end,
+                segment.out_ns.saturating_sub(MIN_SEGMENT_NS),
+            );
         }
         DragPart::Right => {
-            segment.out_ns = shifted(drag.start_out_ns)
-                .clamp(segment.in_ns.saturating_add(MIN_SEGMENT_NS), next_start);
+            segment.out_ns = super::clamp_ns(
+                shifted(drag.start_out_ns),
+                segment.in_ns.saturating_add(MIN_SEGMENT_NS),
+                next_start,
+            );
         }
     }
 }

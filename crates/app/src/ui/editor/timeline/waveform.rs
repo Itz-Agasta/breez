@@ -254,7 +254,7 @@ fn interact(
     index: usize,
     body: Rect,
 ) {
-    let ns_per_px = track.duration_ns as f64 / f64::from(track.width);
+    let ns_per_px = track.duration_ns as f64 / f64::from(track.width.max(1.0));
     let (fade_in_x, fade_out_x) = fade_points(&session.project.timeline.music[index], track, body);
     let handle = |x: f32| {
         Rect::from_center_size(
