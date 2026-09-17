@@ -13,7 +13,7 @@ use breez_core::render::{Ripple, ZoomView};
 use breez_core::wallpaper;
 use rayon::prelude::*;
 
-use crate::raster::{lerp_rgb, rounded_coverage, sample_bilinear};
+use crate::raster::{full_coverage_span, lerp_rgb, rounded_coverage, sample_bilinear};
 
 /// One decoded source frame: tightly packed RGBA8.
 pub struct SourceFrame<'a> {
@@ -77,8 +77,36 @@ impl Compositor {
             .for_each(|(row, line)| {
                 let py = row as f32 + 0.5;
                 let bg = lerp_rgb(top, bottom, py / height);
+                // Source row and the per-pixel step across it: the zoom
+                // window is an affine map, so v is fixed for the row and u
+                // walks linearly.
+                let v = uv.y + (py - out.frame.y) / out.frame.h * uv.h;
+                let sy = v * source.height as f32 - 0.5;
+                let u_at = |px: f32| {
+                    (uv.x + (px - out.frame.x) / out.frame.w * uv.w) * source.width as f32 - 0.5
+                };
+                // Pixels the frame covers completely and the hairline does
+                // not touch need no distance evaluation and no shadow, which
+                // is most of the frame. Ripples fall back to the slow path.
+                let (fast_lo, fast_hi) = if ripples.is_empty() {
+                    full_coverage_span(hairline, hairline_radius, py).unwrap_or((1.0, 0.0))
+                } else {
+                    (1.0, 0.0)
+                };
                 for (col, pixel) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     let px = col as f32 + 0.5;
+                    // Computed from px rather than stepped, so a long row
+                    // cannot drift away from what the preview samples.
+                    let here = u_at(px);
+                    if px >= fast_lo && px <= fast_hi {
+                        let rgb =
+                            sample_bilinear(source.data, source.width, source.height, here, sy);
+                        pixel[0] = rgb[0];
+                        pixel[1] = rgb[1];
+                        pixel[2] = rgb[2];
+                        pixel[3] = 0xff;
+                        continue;
+                    }
                     let coverage = rounded_coverage(out.frame, out.radius, px, py);
                     // The shadow only shows where the frame does not fully
                     // cover the pixel, and it is the most expensive layer, so
@@ -89,15 +117,8 @@ impl Compositor {
                         bg
                     };
                     if coverage > 0.0 {
-                        let u = uv.x + (px - out.frame.x) / out.frame.w * uv.w;
-                        let v = uv.y + (py - out.frame.y) / out.frame.h * uv.h;
-                        let sample = sample_bilinear(
-                            source.data,
-                            source.width,
-                            source.height,
-                            u * source.width as f32 - 0.5,
-                            v * source.height as f32 - 0.5,
-                        );
+                        let sample =
+                            sample_bilinear(source.data, source.width, source.height, here, sy);
                         rgb = blend(rgb, sample, coverage);
                         let inner = rounded_coverage(hairline, hairline_radius, px, py);
                         rgb = blend(rgb, [0, 0, 0], (coverage - inner).max(0.0) * (90.0 / 255.0));

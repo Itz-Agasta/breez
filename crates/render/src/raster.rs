@@ -35,6 +35,33 @@ pub fn rounded_coverage(rect: Rect, radius: f32, px: f32, py: f32) -> f32 {
     (0.5 - distance).clamp(0.0, 1.0)
 }
 
+/// Horizontal span of row `py` over which [`rounded_coverage`] is exactly
+/// `1.0`, or `None` when the row has no fully covered pixels.
+///
+/// The compositor uses this to skip the two distance evaluations for the
+/// bulk of the frame, which is the difference between an export that keeps
+/// up and one that does not.
+pub fn full_coverage_span(rect: Rect, radius: f32, py: f32) -> Option<(f32, f32)> {
+    if rect.w <= 1.0 || rect.h <= 1.0 {
+        return None;
+    }
+    let radius = radius.max(0.0).min(rect.w / 2.0).min(rect.h / 2.0);
+    let (cx, cy) = rect.center();
+    let straight_h = rect.h / 2.0 - radius;
+    let dy = (py - cy).abs() - straight_h;
+    // Inside the straight section the corner arcs do not reach this row.
+    let half = if dy <= 0.0 {
+        rect.w / 2.0 - 0.5
+    } else {
+        let reach = radius - 0.5;
+        if dy > reach {
+            return None;
+        }
+        rect.w / 2.0 - radius + (reach * reach - dy * dy).sqrt()
+    };
+    (half > 0.0).then_some((cx - half, cx + half))
+}
+
 /// Bilinear RGB sample of a tightly packed RGBA8 buffer at pixel
 /// coordinates, clamped at the edges.
 pub fn sample_bilinear(src: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
@@ -93,6 +120,43 @@ mod tests {
     #[test]
     fn rounded_coverage_should_be_zero_outside_the_rect() {
         assert_eq!(rounded_coverage(square(), 0.0, 150.0, 50.0), 0.0);
+    }
+
+    #[test]
+    fn full_coverage_span_should_cover_the_row_minus_a_half_pixel_in_the_straight_section() {
+        let (lo, hi) = full_coverage_span(square(), 20.0, 50.0).expect("span");
+        assert_eq!((lo, hi), (0.5, 99.5));
+    }
+
+    #[test]
+    fn full_coverage_span_should_narrow_across_a_corner_row() {
+        let (lo, hi) = full_coverage_span(square(), 20.0, 5.0).expect("span");
+        assert!(lo > 0.5 && hi < 99.5);
+    }
+
+    #[test]
+    fn full_coverage_span_should_be_empty_past_the_corner_arc() {
+        assert_eq!(full_coverage_span(square(), 20.0, 0.0), None);
+    }
+
+    #[test]
+    fn full_coverage_span_should_agree_with_rounded_coverage() {
+        let rect = Rect {
+            x: 3.0,
+            y: 7.0,
+            w: 81.0,
+            h: 47.0,
+        };
+        for row in 0..60 {
+            let py = row as f32 + 0.5;
+            let span = full_coverage_span(rect, 11.0, py);
+            for col in 0..90 {
+                let px = col as f32 + 0.5;
+                let full = rounded_coverage(rect, 11.0, px, py) >= 1.0;
+                let in_span = span.is_some_and(|(lo, hi)| px >= lo && px <= hi);
+                assert_eq!(full, in_span, "at ({px}, {py})");
+            }
+        }
     }
 
     #[test]
