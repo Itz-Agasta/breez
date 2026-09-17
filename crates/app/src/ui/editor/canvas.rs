@@ -11,8 +11,10 @@ use super::{EditorState, format_ns};
 use crate::app::Session;
 use crate::theme;
 use crate::ui::widgets::{self, segmented::Segment};
+use breez_core::layout::{self, Layout};
 use breez_core::project::RATIOS;
 use breez_core::render::{self, ZoomView};
+use breez_core::wallpaper;
 
 pub fn show(ui: &mut Ui, state: &mut EditorState, session: &mut Session) {
     CentralPanel::no_frame()
@@ -61,25 +63,31 @@ fn stage(ui: &mut Ui, state: &EditorState, session: &Session) {
     }
     let style = &session.project.style;
     // The stage carries the output aspect ratio the user picked.
-    let stage = fit_aspect(bounds, ratio_aspect(&style.ratio));
-    let (top, bottom) = wallpaper_colors(&style.wallpaper);
-    widgets::vertical_gradient(ui.painter(), stage, theme::RADIUS_CARD, top, bottom);
+    let stage = to_egui(layout::fit_aspect(
+        from_egui(bounds),
+        layout::ratio_aspect(&style.ratio),
+    ));
+    let (top, bottom) = wallpaper::wallpaper_colors(&style.wallpaper);
+    widgets::vertical_gradient(
+        ui.painter(),
+        stage,
+        theme::RADIUS_CARD,
+        theme::color32(top),
+        theme::color32(bottom),
+    );
 
     let Some(take) = session.project.takes.last() else {
         return;
     };
-    // Padding is authored against a 1440px-wide stage; scale it with the view.
-    let inset = style.padding as f32 * stage.width() / 1440.0;
-    let avail = stage.shrink(inset.max(8.0));
-    let aspect = take.width.max(1) as f32 / take.height.max(1) as f32;
-    let frame = fit_aspect(avail, aspect);
+    let out = layout::layout(style, from_egui(stage), take.width, take.height);
+    let frame = to_egui(out.frame);
+    let radius = out.radius.round().clamp(0.0, 255.0) as u8;
 
-    let radius = style.radius.min(255) as u8;
-    shadow(ui, frame, style.shadow, radius);
+    shadow(ui, &out, frame, radius);
     match state.player.texture() {
         Some(texture) => {
             let view = zoom_view(state, session);
-            let uv = uv_rect(view);
+            let uv = to_egui(layout::uv_window(view));
             ui.painter().add(Shape::Rect(
                 RectShape::filled(frame, CornerRadius::same(radius), Color32::WHITE)
                     .with_texture(texture.id(), uv),
@@ -87,16 +95,29 @@ fn stage(ui: &mut Ui, state: &EditorState, session: &Session) {
             ui.painter().rect_stroke(
                 frame,
                 CornerRadius::same(radius),
-                Stroke::new(1.0, Color32::from_black_alpha(90)),
+                Stroke::new(out.scale.max(0.5), Color32::from_black_alpha(90)),
                 StrokeKind::Inside,
             );
             if style.cursor.click_highlight {
-                ripples(ui, state, session, frame, uv);
+                ripples(ui, state, session, frame, uv, out.scale);
             }
             zoom_badge(ui, stage, view.level);
         }
         None => placeholder(ui, frame, radius, session, take),
     }
+}
+
+fn from_egui(r: Rect) -> layout::Rect {
+    layout::Rect {
+        x: r.min.x,
+        y: r.min.y,
+        w: r.width(),
+        h: r.height(),
+    }
+}
+
+fn to_egui(r: layout::Rect) -> Rect {
+    Rect::from_min_size(pos2(r.x, r.y), vec2(r.w, r.h))
 }
 
 /// Animated zoom transform at the playhead: the frame rect stays put and
@@ -118,22 +139,9 @@ fn zoom_view(state: &EditorState, session: &Session) -> ZoomView {
     render::zoom_at(timeline, t_ns, cursor)
 }
 
-/// UV window for a zoom view: size `1/level`, centered on the anchor but
-/// clamped so it never samples outside the texture.
-fn uv_rect(view: ZoomView) -> Rect {
-    let half = 0.5 / view.level.max(1.0);
-    Rect::from_center_size(
-        pos2(
-            view.anchor[0].clamp(half, 1.0 - half),
-            view.anchor[1].clamp(half, 1.0 - half),
-        ),
-        vec2(half * 2.0, half * 2.0),
-    )
-}
-
 /// Expanding stroked circles at recent click positions, mapped through the
 /// zoom UV window so they stay glued to the pixels they were clicked on.
-fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rect) {
+fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rect, scale: f32) {
     let timeline = &session.project.timeline;
     let t_ns = state
         .player
@@ -161,7 +169,7 @@ fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rec
         painter.circle_stroke(
             center,
             radius,
-            Stroke::new(2.0, Color32::from_white_alpha(alpha)),
+            Stroke::new(2.0 * scale, Color32::from_white_alpha(alpha)),
         );
     }
 }
@@ -222,42 +230,19 @@ fn placeholder(
 }
 
 /// Cheap drop shadow: a few expanding translucent layers under the frame.
-fn shadow(ui: &Ui, frame: Rect, strength: u32, radius: u8) {
-    if strength == 0 {
+/// The offsets are authored in 1440-reference pixels, so they take the
+/// layout scale like every other px value.
+fn shadow(ui: &Ui, out: &Layout, frame: Rect, radius: u8) {
+    if out.shadow == 0 {
         return;
     }
-    let alpha = (strength as f32 / 100.0 * 40.0) as u8;
+    let alpha = (out.shadow as f32 / 100.0 * 40.0) as u8;
     for (expand, layer_alpha) in [(3.0, alpha), (8.0, alpha / 2), (16.0, alpha / 4)] {
+        let expand = expand * out.scale;
         ui.painter().rect_filled(
             frame.expand(expand).translate(vec2(0.0, expand / 2.0)),
             CornerRadius::same(radius.saturating_add(expand as u8)),
             Color32::from_black_alpha(layer_alpha),
         );
     }
-}
-
-/// Largest rect of the given aspect ratio centered inside `bounds`.
-fn fit_aspect(bounds: Rect, aspect: f32) -> Rect {
-    let size = if bounds.width() / bounds.height() > aspect {
-        vec2(bounds.height() * aspect, bounds.height())
-    } else {
-        vec2(bounds.width(), bounds.width() / aspect)
-    };
-    Rect::from_center_size(bounds.center(), size)
-}
-
-fn ratio_aspect(ratio: &str) -> f32 {
-    match ratio {
-        "9:16" => 9.0 / 16.0,
-        "1:1" => 1.0,
-        _ => 16.0 / 9.0,
-    }
-}
-
-pub fn wallpaper_colors(id: &str) -> (Color32, Color32) {
-    theme::WALLPAPERS
-        .iter()
-        .find(|(name, _, _)| *name == id)
-        .map(|(_, top, bottom)| (*top, *bottom))
-        .unwrap_or((theme::WALLPAPERS[0].1, theme::WALLPAPERS[0].2))
 }

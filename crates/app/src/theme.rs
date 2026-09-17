@@ -46,45 +46,17 @@ pub const CANVAS_STRIP_HEIGHT: f32 = 44.0;
 pub const TRANSPORT_HEIGHT: f32 = 48.0;
 pub const GUTTER_WIDTH: f32 = 96.0;
 
-/// Wallpaper presets: (id, gradient top, gradient bottom). The id is what
-/// `project.json` stores in `style.wallpaper`.
-pub const WALLPAPERS: &[(&str, Color32, Color32)] = &[
-    (
-        "aurora",
-        Color32::from_rgb(0x14, 0x55, 0x52),
-        Color32::from_rgb(0x67, 0x2f, 0xa8),
-    ),
-    (
-        "sunset",
-        Color32::from_rgb(0xc2, 0x55, 0x1f),
-        Color32::from_rgb(0x4c, 0x1d, 0x95),
-    ),
-    (
-        "dusk",
-        Color32::from_rgb(0x1e, 0x29, 0x3b),
-        Color32::from_rgb(0x6d, 0x28, 0x59),
-    ),
-    (
-        "ocean",
-        Color32::from_rgb(0x0c, 0x4a, 0x6e),
-        Color32::from_rgb(0x15, 0x5e, 0x75),
-    ),
-    (
-        "forest",
-        Color32::from_rgb(0x14, 0x53, 0x2d),
-        Color32::from_rgb(0x36, 0x53, 0x14),
-    ),
-    (
-        "ember",
-        Color32::from_rgb(0x7f, 0x1d, 0x1d),
-        Color32::from_rgb(0xc2, 0x41, 0x0c),
-    ),
-    (
-        "mono",
-        Color32::from_rgb(0x26, 0x26, 0x26),
-        Color32::from_rgb(0x0f, 0x0f, 0x0f),
-    ),
-];
+/// egui view over [`breez_core::wallpaper::WALLPAPERS`]. The palette itself
+/// lives in core so the export compositor reads the same stops.
+pub fn color32(rgb: [u8; 3]) -> Color32 {
+    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+pub fn wallpapers() -> impl Iterator<Item = (&'static str, Color32, Color32)> {
+    breez_core::wallpaper::WALLPAPERS
+        .iter()
+        .map(|(id, top, bottom)| (*id, color32(*top), color32(*bottom)))
+}
 
 /// Semibold proportional family, registered in [`fonts`].
 pub fn semibold() -> FontFamily {

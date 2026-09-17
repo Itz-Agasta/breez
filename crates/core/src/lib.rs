@@ -5,7 +5,9 @@
 //! capture, codec, or UI dependencies.
 
 pub mod events;
+pub mod layout;
 pub mod package;
 pub mod project;
 pub mod render;
 pub mod timeline;
+pub mod wallpaper;

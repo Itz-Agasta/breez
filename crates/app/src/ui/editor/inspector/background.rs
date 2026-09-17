@@ -17,13 +17,13 @@ pub fn show(ui: &mut Ui, session: &mut Session) -> bool {
     row_label(ui, "Wallpaper");
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        for (id, top, bottom) in theme::WALLPAPERS {
-            let selected = style.wallpaper == *id;
-            if widgets::swatch::swatch(ui, *top, *bottom, selected)
-                .on_hover_text(*id)
+        for (id, top, bottom) in theme::wallpapers() {
+            let selected = style.wallpaper == id;
+            if widgets::swatch::swatch(ui, top, bottom, selected)
+                .on_hover_text(id)
                 .clicked()
             {
-                style.wallpaper = (*id).to_owned();
+                style.wallpaper = id.to_owned();
                 changed = true;
             }
         }
