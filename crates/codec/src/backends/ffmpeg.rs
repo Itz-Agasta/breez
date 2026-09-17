@@ -18,8 +18,10 @@ use ffmpeg_sidecar::event::{FfmpegEvent, LogLevel};
 use ffmpeg_sidecar::iter::FfmpegIterator;
 
 use crate::CodecError;
+use crate::backends::graph;
 use crate::decoder::VideoFrame;
 use crate::encoder::{AudioEncoderConfig, PixelFormat, VideoEncoderConfig};
+use crate::export::ExportConfig;
 
 pub(crate) fn ensure_available() -> Result<(), CodecError> {
     ffmpeg_sidecar::download::auto_download().map_err(|e| CodecError::Backend(e.to_string()))
@@ -146,6 +148,61 @@ impl Drop for FfmpegSink {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// One export process: rawvideo RGBA on stdin plus every audio file as an
+/// extra input, muxed to a faststart MP4. `-shortest` is deliberately
+/// absent: the video pipe defines the length and the audio graph is already
+/// trimmed to the timeline.
+pub(crate) fn spawn_export(dest: &Path, config: &ExportConfig) -> Result<FfmpegSink, CodecError> {
+    let mut cmd = FfmpegCommand::new();
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-s",
+        &format!("{}x{}", config.width, config.height),
+        "-r",
+        &config.fps.to_string(),
+        "-i",
+        "pipe:0",
+    ]);
+    if let Some(system) = &config.system_audio {
+        cmd.arg("-i");
+        cmd.arg(&system.path);
+    }
+    for track in &config.music {
+        cmd.arg("-i");
+        cmd.arg(&track.path);
+    }
+    match graph::filter_graph(config) {
+        Some(graph) => {
+            cmd.args(["-filter_complex", &graph, "-map", "0:v", "-map", "[aout]"]);
+            cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+        }
+        None => {
+            cmd.args(["-map", "0:v", "-an"]);
+        }
+    }
+    cmd.args([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        &config.crf.to_string(),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-y",
+    ]);
+    cmd.arg(dest);
+    FfmpegSink::spawn(cmd)
 }
 
 /// One decode process streaming RGBA frames from `start_ns` onward. Seeking

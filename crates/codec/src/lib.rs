@@ -8,6 +8,7 @@
 mod backends;
 pub mod decoder;
 pub mod encoder;
+pub mod export;
 pub mod peaks;
 pub mod thumbs;
 
@@ -15,6 +16,7 @@ pub use decoder::{VideoDecoder, VideoFrame};
 pub use encoder::{
     AudioEncoder, AudioEncoderConfig, PixelFormat, VideoEncoder, VideoEncoderConfig,
 };
+pub use export::{AudioClip, ExportConfig, Exporter, MusicSource, SystemAudio};
 pub use peaks::{AudioPeaks, generate_peaks};
 pub use thumbs::generate_thumbs;
 
