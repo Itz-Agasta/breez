@@ -1,0 +1,22 @@
+crates/core/src/timeline.rs
+  s_66cf942f216b6a::t_97e412a048d2e1 103-106
+  s_66cf942f216b6a::t_7b27e43d3322f0 19-21,23-26,31-35
+  s_66cf942f216b6a::t_b1f25077329120 162-193
+  s_66cf942f216b6a::t_d10da0dd221213 194
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "56dbb5ce5b85202b7ff4f92f1a43cfeff955da07",
+  "prompts": {},
+  "sessions": {
+    "s_66cf942f216b6a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bf2dcdd0-a785-43f5-9d13-e73377c721e3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Itz-Agasta <rupamgolui69@gmail.com>"
+    }
+  }
+}
