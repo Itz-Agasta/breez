@@ -11,7 +11,7 @@ pub mod plan;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
 use breez_codec::{ExportConfig, Exporter, SequentialReader};
@@ -105,9 +105,34 @@ pub struct ExportJob {
 /// over it only once the whole export succeeded. A cancelled, failed or
 /// panicked export therefore never touches a file that was already there.
 /// The `.mp4` suffix stays, because ffmpeg picks the muxer from it.
+///
+/// The name carries a per-run counter so two exports to one destination
+/// cannot share a partial, and so the path is not the fixed, guessable name
+/// that [`create_partial`] would then have to refuse.
 fn partial_path(dest: &Path) -> PathBuf {
+    static RUN: AtomicU64 = AtomicU64::new(0);
+
     let name = dest.file_name().unwrap_or_default().to_string_lossy();
-    dest.with_file_name(format!(".{name}.part.mp4"))
+    dest.with_file_name(format!(
+        ".{name}.part-{}-{}.mp4",
+        std::process::id(),
+        RUN.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// Create the partial before ffmpeg opens it.
+///
+/// `create_new` is `O_CREAT | O_EXCL`, which fails on anything already at the
+/// path, a symlink included. Without it a stale or planted symlink here would
+/// be followed by ffmpeg's `-y` and an unrelated file written through it.
+/// Once this returns, the path is a regular file of ours for ffmpeg to
+/// truncate.
+fn create_partial(partial: &Path) -> Result<(), JobError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(partial)?;
+    Ok(())
 }
 
 impl ExportJob {
@@ -128,6 +153,7 @@ impl ExportJob {
         let package = package.clone();
         let project = project.clone();
         let clicks = clicks.clone();
+        let worker_partial = partial.clone();
         let worker_cancel = Arc::clone(&cancel);
         let worker_tx = tx.clone();
         let spawned = std::thread::Builder::new()
@@ -138,6 +164,7 @@ impl ExportJob {
                     &project,
                     &clicks,
                     &settings,
+                    &worker_partial,
                     &worker_tx,
                     &worker_cancel,
                 );
@@ -207,6 +234,7 @@ fn run(
     project: &Project,
     clicks: &HashMap<u32, Vec<InputEvent>>,
     settings: &Settings,
+    partial: &Path,
     tx: &Sender<Progress>,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, JobError> {
@@ -232,9 +260,9 @@ fn run(
         settings.preset.short_side(take.width.min(take.height)),
     );
     let (system_audio, music) = plan::audio_sources(package, project);
-    let partial = partial_path(&settings.dest);
-    let mut exporter = Exporter::create(
-        &partial,
+    create_partial(partial)?;
+    let mut exporter = match Exporter::create(
+        partial,
         &ExportConfig {
             width,
             height,
@@ -243,7 +271,16 @@ fn run(
             system_audio,
             music,
         },
-    )?;
+    ) {
+        Ok(exporter) => exporter,
+        // The exporter owns the partial from here on and removes it itself;
+        // until it exists, the file this function created is its own to take
+        // back.
+        Err(e) => {
+            let _ = std::fs::remove_file(partial);
+            return Err(e.into());
+        }
+    };
     let mut compositor = Compositor::new(width, height);
     let mut reader = match SequentialReader::open(&video, 0) {
         Ok(reader) => reader,
@@ -281,11 +318,11 @@ fn run(
             finished: None,
         });
     }
-    exporter_finish(exporter, &partial)?;
+    exporter_finish(exporter, partial)?;
     // Same directory, so this is a rename on one filesystem: the destination
     // either keeps its old content or becomes the finished export.
-    std::fs::rename(&partial, &settings.dest).map_err(|e| {
-        let _ = std::fs::remove_file(&partial);
+    std::fs::rename(partial, &settings.dest).map_err(|e| {
+        let _ = std::fs::remove_file(partial);
         JobError::from(e)
     })?;
     Ok(settings.dest.clone())
@@ -342,4 +379,29 @@ fn compose_frame(
     );
     exporter.push_frame(composed)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_partial_should_refuse_a_symlink_left_at_the_path() {
+        // ffmpeg runs with -y and follows a symlink, so a stale or planted
+        // one here would let an export write through to an unrelated file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("untouched.txt");
+        std::fs::write(&victim, b"original").expect("victim");
+        let partial = dir.path().join(".out.mp4.part-1-0.mp4");
+        std::os::unix::fs::symlink(&victim, &partial).expect("symlink");
+
+        assert!(create_partial(&partial).is_err());
+        assert_eq!(std::fs::read(&victim).expect("victim"), b"original");
+    }
+
+    #[test]
+    fn partial_path_should_differ_between_runs_to_one_destination() {
+        let dest = Path::new("/tmp/demo.mp4");
+        assert_ne!(partial_path(dest), partial_path(dest));
+    }
 }

@@ -628,6 +628,7 @@ dependencies = [
  "log",
  "rfd",
  "rodio",
+ "tempfile",
 ]
 
 [[package]]
