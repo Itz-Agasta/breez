@@ -59,13 +59,23 @@ fn publish(
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
     let decoded = ffmpeg::run_thumbs(video, &staging, count, width, duration_ns);
-    if decoded.is_ok() {
-        // Fails when another run published first, and that set answers the
-        // same request, so only the decode's own error is worth reporting.
-        let _ = std::fs::rename(&staging, set_dir);
-    }
+    let result = decoded.and_then(|()| place(&staging, set_dir));
     let _ = std::fs::remove_dir_all(&staging);
-    decoded
+    result
+}
+
+/// Move a staged set into place.
+///
+/// A competing run that published first is the one expected failure, and its
+/// set answers the same request, so the cache hit is real. Any other failure
+/// means nothing landed, and reporting success would hand the caller the
+/// empty list that reading the missing directory produces.
+fn place(staging: &Path, set_dir: &Path) -> Result<(), CodecError> {
+    match std::fs::rename(staging, set_dir) {
+        Ok(()) => Ok(()),
+        Err(_) if set_dir.is_dir() => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +104,32 @@ mod tests {
         let paths =
             generate_thumbs(Path::new(MISSING), dir.path(), 20, 160, 1_000_000_000).expect("hit");
         assert_eq!(paths.len(), 2);
+    }
+
+    #[test]
+    fn place_should_report_a_publish_that_did_not_land() {
+        // A rename failing for any reason other than a competing publisher
+        // leaves nothing at set_dir, so reporting success would hand the
+        // caller the empty list that reading the missing directory produces.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging");
+        let blocked = dir.path().join("20x160");
+        std::fs::write(&blocked, []).expect("file in the way");
+
+        assert!(place(&staging, &blocked).is_err());
+    }
+
+    #[test]
+    fn place_should_accept_a_set_another_run_published_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).expect("staging");
+        let set_dir = dir.path().join("20x160");
+        publish_set(dir.path(), "20x160", 2);
+
+        // The winner's set answers the same request, so this is a cache hit.
+        place(&staging, &set_dir).expect("race is not an error");
     }
 
     #[test]
