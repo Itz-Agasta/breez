@@ -349,6 +349,13 @@ struct AudioStream<'a> {
     sample_rate: u32,
     channels: u16,
     expected_ns: Option<i64>,
+    /// Newest packet seen while the anchor was still unknown, as
+    /// `(stream_time_ns, interleaved f32 bytes)`. `next_event` hands out
+    /// pending audio ahead of video, so the packet the first video frame
+    /// lands inside is normally the last one to arrive anchorless; only its
+    /// leading samples precede the take. Earlier ones precede it entirely
+    /// and are dropped, which keeps this to one packet.
+    pending: Option<(i64, Vec<u8>)>,
     packets: u64,
 }
 
@@ -368,6 +375,7 @@ impl<'a> AudioStream<'a> {
             sample_rate: 0,
             channels: 0,
             expected_ns: None,
+            pending: None,
             packets: 0,
         }
     }
@@ -385,19 +393,24 @@ impl<'a> AudioStream<'a> {
         frame: &pinray::AudioFrame,
         anchor_ns: Option<i64>,
     ) -> Result<(), CaptureError> {
-        // No video yet means this packet precedes the take entirely.
-        let Some(anchor_ns) = anchor_ns else {
-            return Ok(());
-        };
         if frame.sample_format != pinray::SampleFormat::F32 {
             return Err(CaptureError::Unsupported(format!(
                 "audio sample format {:?}",
                 frame.sample_format
             )));
         }
-        let mut bytes = match &frame.data {
+        let bytes = match &frame.data {
             pinray::AudioData::Interleaved(b) => b.clone(),
             pinray::AudioData::Planar(planes) => interleave_f32(planes),
+        };
+        // No video yet, so the anchor is unknown and this packet cannot be
+        // trimmed against it. Holding it (instead of dropping it whole)
+        // keeps the samples after the anchor when the first frame lands
+        // mid-packet, which would otherwise open a hole of up to one packet
+        // at the head of the take.
+        let Some(anchor_ns) = anchor_ns else {
+            self.pending = Some((frame.stream_time_ns, bytes));
+            return Ok(());
         };
         if self.encoder.is_none() {
             if frame.sample_rate == 0 || frame.channels == 0 {
@@ -415,12 +428,26 @@ impl<'a> AudioStream<'a> {
             self.sample_rate = frame.sample_rate;
             self.channels = frame.channels;
         }
-        let encoder = self.encoder.as_mut().expect("initialized above");
+        // Same stream, so the held packet shares this one's rate and layout.
+        if let Some((start_ns, bytes)) = self.pending.take() {
+            self.append(start_ns, bytes, anchor_ns)?;
+        }
+        self.append(frame.stream_time_ns, bytes, anchor_ns)
+    }
+
+    /// Write one packet of interleaved f32 bytes, trimming whatever it holds
+    /// from before `anchor_ns` and padding any hole ahead of it.
+    fn append(
+        &mut self,
+        mut start_ns: i64,
+        mut bytes: Vec<u8>,
+        anchor_ns: i64,
+    ) -> Result<(), CaptureError> {
+        let encoder = self.encoder.as_mut().expect("initialized by push");
 
         let bytes_per_second = self.sample_rate as i64 * self.channels as i64 * 4;
         let sample_bytes = self.channels as usize * 4;
 
-        let mut start_ns = frame.stream_time_ns;
         if start_ns < anchor_ns {
             // Recorded before the take began: drop that much of the packet.
             let skip = lead_trim_bytes(
