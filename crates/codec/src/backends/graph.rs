@@ -20,6 +20,15 @@ fn secs(ns: u64) -> String {
     format!("{:.6}", ns as f64 / 1e9)
 }
 
+/// Milliseconds at fixed precision, for `adelay`. Its parser reads a plain
+/// value as a float count of milliseconds (only an `S` suffix switches it to
+/// samples), so a fractional offset survives; truncating to whole
+/// milliseconds here would start the track up to 0.999 ms before the
+/// preview does.
+fn millis(ns: u64) -> String {
+    format!("{:.3}", ns as f64 / 1e6)
+}
+
 /// The system audio input this export actually has, if any.
 ///
 /// A `SystemAudio` with no clips selects nothing, so it contributes no input
@@ -124,14 +133,13 @@ fn music_chain(track: &MusicSource, input: u32, index: usize) -> String {
     // multiply just as the two factors do there.
     let fade_in = track.fade_in_ns.min(audible);
     let fade_out = track.fade_out_ns.min(audible);
-    let delay_ms = track.offset_ns / 1_000_000;
-
     let mut chain = format!(
         "[{input}:a]atrim=end={},asetpts=PTS-STARTPTS",
         secs(audible)
     );
-    if delay_ms > 0 {
-        chain.push_str(&format!(",adelay={delay_ms}|{delay_ms}:all=1"));
+    if track.offset_ns > 0 {
+        let delay = millis(track.offset_ns);
+        chain.push_str(&format!(",adelay={delay}|{delay}:all=1"));
     }
     if fade_in > 0 {
         chain.push_str(&format!(
@@ -252,7 +260,7 @@ mod tests {
     fn graph_should_delay_fade_and_scale_each_music_track() {
         let g =
             filter_graph(&config(None, vec![music(2_000_000_000, 10_000_000_000)])).expect("graph");
-        assert!(g.contains("adelay=2000|2000:all=1"));
+        assert!(g.contains("adelay=2000.000|2000.000:all=1"));
         assert!(g.contains("afade=t=in:st=2.000000:d=0.500000"));
         // The audible span ends at 12s, so the 1s fade-out starts at 11s.
         assert!(g.contains("afade=t=out:st=11.000000:d=1.000000"));
@@ -266,6 +274,14 @@ mod tests {
         let g = filter_graph(&config(None, vec![music(0, 400_000_000)])).expect("graph");
         assert!(g.contains("afade=t=in:st=0.000000:d=0.400000"));
         assert!(g.contains("afade=t=out:st=0.000000:d=0.400000"));
+    }
+
+    #[test]
+    fn graph_should_keep_a_fractional_millisecond_offset() {
+        // 2.0005s: whole-millisecond delays started the track 0.5 ms early.
+        let g =
+            filter_graph(&config(None, vec![music(2_000_500_000, 10_000_000_000)])).expect("graph");
+        assert!(g.contains("adelay=2000.500|2000.500:all=1"));
     }
 
     #[test]

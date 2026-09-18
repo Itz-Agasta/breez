@@ -33,13 +33,19 @@ pub fn generate_peaks(audio: &Path, cache_path: &Path) -> Result<AudioPeaks, Cod
         return Ok(cached);
     }
     let peaks = ffmpeg::run_peaks(audio, PEAKS_PER_SEC)?;
-    if let Some(parent) = cache_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    // A failed cache write only costs a re-decode next session.
-    let json = serde_json::to_vec(&peaks).map_err(|e| CodecError::Backend(e.to_string()))?;
-    if let Err(e) = fs::write(cache_path, json) {
+    // A failed cache write only costs a re-decode next session, so an
+    // unwritable package (read-only media, say) still gets its waveform.
+    if let Err(e) = write_cache(cache_path, &peaks) {
         log::warn!("peaks cache {}: {e}", cache_path.display());
     }
     Ok(peaks)
+}
+
+fn write_cache(cache_path: &Path, peaks: &AudioPeaks) -> Result<(), CodecError> {
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec(peaks).map_err(|e| CodecError::Backend(e.to_string()))?;
+    fs::write(cache_path, json)?;
+    Ok(())
 }

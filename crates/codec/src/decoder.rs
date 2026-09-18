@@ -85,7 +85,12 @@ impl SequentialReader {
     ///
     /// Seeks only when `src_ns` falls behind where the walk has reached.
     pub fn frame_at(&mut self, src_ns: u64) -> Result<VideoFrame, CodecError> {
-        if self.last.as_ref().is_some_and(|f| f.pts_ns > src_ns) {
+        // The earliest frame still held, which is `pending` when the walk
+        // has not passed a frame yet (an open at a nonzero position, or a
+        // seek that landed late). Testing `last` alone would leave those
+        // answering an earlier request with the later frame they hold.
+        let earliest = self.last.as_ref().or(self.pending.as_ref());
+        if earliest.is_some_and(|f| f.pts_ns > src_ns) {
             self.decoder.seek(src_ns)?;
             self.last = None;
             self.pending = None;
