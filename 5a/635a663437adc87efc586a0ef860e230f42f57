@@ -1,0 +1,23 @@
+crates/capture/src/recorder.rs
+  s_66cf942f216b6a::t_6495e7f2bff875 402,406-413
+  s_66cf942f216b6a::t_5071716f7fefe3 431-446
+  s_66cf942f216b6a::t_f4148df495c9a9 378
+  s_66cf942f216b6a::t_34b586eb88b5ab 352-358
+  s_66cf942f216b6a::t_a702e66b253a6d 414
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5a635a663437adc87efc586a0ef860e230f42f57",
+  "prompts": {},
+  "sessions": {
+    "s_66cf942f216b6a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bf2dcdd0-a785-43f5-9d13-e73377c721e3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Itz-Agasta <rupamgolui69@gmail.com>"
+    }
+  }
+}
