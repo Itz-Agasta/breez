@@ -49,11 +49,14 @@ pub fn full_coverage_span(rect: Rect, radius: f32, py: f32) -> Option<(f32, f32)
     let (cx, cy) = rect.center();
     let straight_h = rect.h / 2.0 - radius;
     let dy = (py - cy).abs() - straight_h;
-    // Inside the straight section the corner arcs do not reach this row.
-    let half = if dy <= 0.0 {
+    let reach = radius - 0.5;
+    // Inside the straight section the corner arcs do not reach this row, but
+    // the row still has to sit half a pixel inside the rect for its pixels to
+    // be fully covered. With a radius under 0.5px the straight section reaches
+    // closer to the edge than that, so `reach` is the bound in both branches.
+    let half = if dy <= reach.min(0.0) {
         rect.w / 2.0 - 0.5
     } else {
-        let reach = radius - 0.5;
         if dy > reach {
             return None;
         }
@@ -139,23 +142,45 @@ mod tests {
         assert_eq!(full_coverage_span(square(), 20.0, 0.0), None);
     }
 
+    fn assert_span_agrees_with_coverage(rect: Rect, radius: f32) {
+        for row in 0..60 {
+            let py = row as f32 + 0.5;
+            let span = full_coverage_span(rect, radius, py);
+            for col in 0..90 {
+                let px = col as f32 + 0.5;
+                let full = rounded_coverage(rect, radius, px, py) >= 1.0;
+                let in_span = span.is_some_and(|(lo, hi)| px >= lo && px <= hi);
+                assert_eq!(full, in_span, "at ({px}, {py}) with radius {radius}");
+            }
+        }
+    }
+
     #[test]
     fn full_coverage_span_should_agree_with_rounded_coverage() {
+        assert_span_agrees_with_coverage(
+            Rect {
+                x: 3.0,
+                y: 7.0,
+                w: 81.0,
+                h: 47.0,
+            },
+            11.0,
+        );
+    }
+
+    #[test]
+    fn full_coverage_span_should_agree_with_rounded_coverage_at_a_sub_pixel_radius() {
+        // Fractional origin so pixel centers land in the half pixel just
+        // inside the top and bottom edges, which is where a radius under
+        // 0.5px leaves no straight section to spare.
         let rect = Rect {
-            x: 3.0,
-            y: 7.0,
+            x: 3.2,
+            y: 7.2,
             w: 81.0,
             h: 47.0,
         };
-        for row in 0..60 {
-            let py = row as f32 + 0.5;
-            let span = full_coverage_span(rect, 11.0, py);
-            for col in 0..90 {
-                let px = col as f32 + 0.5;
-                let full = rounded_coverage(rect, 11.0, px, py) >= 1.0;
-                let in_span = span.is_some_and(|(lo, hi)| px >= lo && px <= hi);
-                assert_eq!(full, in_span, "at ({px}, {py})");
-            }
+        for radius in [0.0, 0.25, 0.49] {
+            assert_span_agrees_with_coverage(rect, radius);
         }
     }
 
