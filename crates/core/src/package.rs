@@ -121,13 +121,21 @@ impl RecPackage {
     }
 
     /// Disposable waveform-peaks cache for a music file (`rel` as stored in
-    /// `project.json`). Music file names are unique within the package, so
-    /// the file name alone keys the cache.
+    /// `project.json`). The whole relative path is folded into the cache file
+    /// name: keying on the file name alone makes two same-named files in
+    /// different directories share (and show) one waveform.
     pub fn peaks_path(&self, rel: &str) -> PathBuf {
-        let name = Path::new(rel)
-            .file_name()
-            .map_or_else(|| rel.to_owned(), |n| n.to_string_lossy().into_owned());
-        self.root.join(format!("cache/peaks/{name}.json"))
+        let key: String = rel
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.root.join(format!("cache/peaks/{key}.json"))
     }
 
     /// Copy an audio file into `media/music/` (deduplicating the name) so
@@ -266,6 +274,18 @@ mod tests {
         assert_eq!(pkg.import_music(&src).unwrap(), "media/music/song.mp3");
         assert_eq!(pkg.import_music(&src).unwrap(), "media/music/song-1.mp3");
         assert!(pkg.root().join("media/music/song-1.mp3").exists());
+    }
+
+    #[test]
+    fn peaks_path_should_differ_for_same_named_files_in_different_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = RecPackage::create(dir.path().join("demo.rec")).unwrap();
+        let a = pkg.peaks_path("media/music/song.mp3");
+        let b = pkg.peaks_path("media/music/alt/song.mp3");
+        assert_ne!(a, b);
+        // Still one flat file inside the cache directory.
+        assert_eq!(a.parent().unwrap(), pkg.root().join("cache/peaks"));
+        assert_eq!(b.parent().unwrap(), pkg.root().join("cache/peaks"));
     }
 
     #[test]

@@ -75,24 +75,46 @@ fn smoothstep(p: f32) -> f32 {
 }
 
 /// Follow-cursor anchor at source time `src_ns`: the latest click at or
-/// before it, gliding from the previous click position over [`GLIDE_NS`] so
-/// a zoomed view pans instead of jump-cutting. `clicks` must be the take's
-/// button-down events sorted by time.
+/// before it, glided to over [`GLIDE_NS`] from wherever the anchor stood when
+/// that click landed, so a zoomed view pans instead of jump-cutting.
+/// `clicks` must be the take's button-down events sorted by time.
 pub fn cursor_anchor(clicks: &[InputEvent], src_ns: u64) -> Option<[f32; 2]> {
-    let upto = clicks.partition_point(|e| e.t_ns <= src_ns);
-    let current = clicks.get(upto.checked_sub(1)?)?;
-    let Some(previous) = upto.checked_sub(2).and_then(|i| clicks.get(i)) else {
-        return Some([current.x, current.y]);
-    };
-    let dt = src_ns - current.t_ns;
+    let current = clicks
+        .partition_point(|e| e.t_ns <= src_ns)
+        .checked_sub(1)?;
+    // A click landing mid-glide has to continue from where the pan had got
+    // to, so walk back over the run of clicks closer together than the glide
+    // and replay it. Starting from the previous click's raw position instead
+    // teleports the anchor backwards on every fast second click.
+    let mut first = current;
+    while first > 0 && clicks[first].t_ns - clicks[first - 1].t_ns < GLIDE_NS {
+        first -= 1;
+    }
+    // The run starts settled on the click before it (or on itself when there
+    // is none).
+    let settled = &clicks[first.saturating_sub(1)];
+    let mut anchor = [settled.x, settled.y];
+    for i in first..=current {
+        let until = if i == current {
+            src_ns
+        } else {
+            clicks[i + 1].t_ns
+        };
+        anchor = glide(anchor, &clicks[i], until - clicks[i].t_ns);
+    }
+    Some(anchor)
+}
+
+/// The anchor `dt` after a click that started gliding from `from`.
+fn glide(from: [f32; 2], to: &InputEvent, dt: u64) -> [f32; 2] {
     if dt >= GLIDE_NS {
-        return Some([current.x, current.y]);
+        return [to.x, to.y];
     }
     let p = smoothstep(dt as f32 / GLIDE_NS as f32);
-    Some([
-        previous.x + (current.x - previous.x) * p,
-        previous.y + (current.y - previous.y) * p,
-    ])
+    [
+        from[0] + (to.x - from[0]) * p,
+        from[1] + (to.y - from[1]) * p,
+    ]
 }
 
 /// Volume of a music track at timeline time `t_ns`: the track gain shaped
@@ -228,6 +250,21 @@ mod tests {
         // Mid-glide sits strictly between the two.
         let mid = cursor_anchor(&clicks, 1_100_000_000).unwrap();
         assert!(mid[0] > 0.0 && mid[0] < 1.0);
+    }
+
+    #[test]
+    fn cursor_anchor_should_continue_from_mid_glide_on_a_fast_second_click() {
+        // The third click lands 100ms after the second, mid-glide: the pan
+        // carries on from where it is instead of snapping to the second.
+        let clicks = vec![
+            click(0, 0.0, 0.0),
+            click(1_000_000_000, 1.0, 1.0),
+            click(1_100_000_000, 0.0, 0.0),
+        ];
+        let before = cursor_anchor(&clicks, 1_099_999_999).unwrap();
+        let at = cursor_anchor(&clicks, 1_100_000_000).unwrap();
+        assert!((at[0] - before[0]).abs() < 1e-3, "{before:?} -> {at:?}");
+        assert!(at[0] > 0.3 && at[0] < 0.4);
     }
 
     fn music(offset_ns: u64, duration_ns: u64) -> MusicTrack {
