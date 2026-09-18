@@ -99,7 +99,7 @@ fn stage(ui: &mut Ui, state: &EditorState, session: &Session) {
                 StrokeKind::Inside,
             );
             if style.cursor.click_highlight {
-                ripples(ui, state, session, frame, uv, out.scale);
+                ripples(ui, state, session, frame, uv, &out);
             }
             zoom_badge(ui, stage, view.level);
         }
@@ -141,7 +141,7 @@ fn zoom_view(state: &EditorState, session: &Session) -> ZoomView {
 
 /// Expanding stroked circles at recent click positions, mapped through the
 /// zoom UV window so they stay glued to the pixels they were clicked on.
-fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rect, scale: f32) {
+fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rect, out: &Layout) {
     let timeline = &session.project.timeline;
     let t_ns = state
         .player
@@ -153,7 +153,28 @@ fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rec
     let Some(clicks) = state.clicks.get(&ct.take) else {
         return;
     };
-    let painter = ui.painter_at(frame);
+    // Export masks the ripples with the frame's rounded coverage, and egui
+    // clips to rectangles only, so paint through three bands that tile the
+    // frame minus its corner squares: nothing lands outside the rounded
+    // edge, and the bands are disjoint, so no stroke is blended twice.
+    let r = out
+        .radius
+        .clamp(0.0, frame.width().min(frame.height()) / 2.0);
+    let painters = [
+        Rect::from_min_max(
+            pos2(frame.min.x + r, frame.min.y),
+            pos2(frame.max.x - r, frame.max.y),
+        ),
+        Rect::from_min_max(
+            pos2(frame.min.x, frame.min.y + r),
+            pos2(frame.min.x + r, frame.max.y - r),
+        ),
+        Rect::from_min_max(
+            pos2(frame.max.x - r, frame.min.y + r),
+            pos2(frame.max.x, frame.max.y - r),
+        ),
+    ]
+    .map(|band| ui.painter_at(band));
     for ripple in render::ripples_at(clicks, ct.src_ns) {
         let x = (ripple.x - uv.min.x) / uv.width();
         let y = (ripple.y - uv.min.y) / uv.height();
@@ -166,11 +187,10 @@ fn ripples(ui: &Ui, state: &EditorState, session: &Session, frame: Rect, uv: Rec
         );
         let radius = frame.width() * (0.006 + 0.022 * ripple.progress);
         let alpha = ((1.0 - ripple.progress) * 180.0) as u8;
-        painter.circle_stroke(
-            center,
-            radius,
-            Stroke::new(2.0 * scale, Color32::from_white_alpha(alpha)),
-        );
+        let stroke = Stroke::new(2.0 * out.scale, Color32::from_white_alpha(alpha));
+        for painter in &painters {
+            painter.circle_stroke(center, radius, stroke);
+        }
     }
 }
 
