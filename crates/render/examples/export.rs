@@ -7,9 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use breez_codec::{AudioClip, ExportConfig, Exporter, MusicSource, SequentialReader, SystemAudio};
+use breez_codec::{
+    AudioClip, ExportConfig, Exporter, MusicSource, SequentialReader, SystemAudio, ensure_ffmpeg,
+};
 use breez_core::package::RecPackage;
-use breez_core::project::{Project, Timeline};
+use breez_core::project::{Project, Take, Timeline};
 use breez_core::render::{self, ZoomView, audible_span_ns};
 use breez_core::timeline::{frame_count, frame_time_ns};
 use breez_core::{events, layout};
@@ -27,11 +29,17 @@ fn main() -> Result<(), Error> {
     let package = RecPackage::open(&pkg)?;
     let mut project = Project::load(&package)?;
     project.sanitize();
-    let take = project.takes.first().ok_or("package has no takes")?.clone();
+    let take = project
+        .primary_take()
+        .ok_or("timeline references no take")?
+        .clone();
 
     let fps = take.fps.max(1);
     let duration = project.timeline.duration_ns();
     let total = frame_count(duration, fps);
+    if total == 0 {
+        return Err("timeline is empty".into());
+    }
     let (width, height) = layout::output_size(&project.style.ratio, short_side);
     println!(
         "{} -> {}: {width}x{height} @ {fps}fps, {total} frames ({:.2}s)",
@@ -40,6 +48,7 @@ fn main() -> Result<(), Error> {
         duration as f64 / 1e9
     );
 
+    ensure_ffmpeg()?;
     let mut exporter = Exporter::create(
         Path::new(&dest),
         &ExportConfig {
@@ -47,11 +56,11 @@ fn main() -> Result<(), Error> {
             height,
             fps,
             crf: 23,
-            system_audio: system_audio(&package, &project),
+            system_audio: system_audio(&package, &project, &take),
             music: music(&package, &project),
         },
     )?;
-    let clicks = click_events(&package, &project);
+    let clicks = click_events(&package, &take);
     let mut compositor = Compositor::new(width, height);
     let video = package.resolve(&take.video)?;
     let mut reader = SequentialReader::open(&video, 0)?;
@@ -62,6 +71,11 @@ fn main() -> Result<(), Error> {
         let Some(clip_time) = project.timeline.resolve(t_ns) else {
             break;
         };
+        // One export renders one take; a clip pointing elsewhere would decode
+        // from the wrong file.
+        if clip_time.take != take.id {
+            return Err("timeline spans more than one take, which export cannot do yet".into());
+        }
         let frame = reader.frame_at(clip_time.src_ns)?;
         let zoom: ZoomView = render::zoom_at(
             &project.timeline,
@@ -95,11 +109,9 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn system_audio(package: &RecPackage, project: &Project) -> Option<SystemAudio> {
-    let path = package
-        .resolve(project.takes.first()?.audio.as_deref()?)
-        .ok()?;
-    let clips = clip_slices(&project.timeline, project.takes.first()?.id);
+fn system_audio(package: &RecPackage, project: &Project, take: &Take) -> Option<SystemAudio> {
+    let path = package.resolve(take.audio.as_deref()?).ok()?;
+    let clips = clip_slices(&project.timeline, take.id);
     (!clips.is_empty()).then_some(SystemAudio {
         path,
         gain: project.style.system_audio_gain,
@@ -143,11 +155,10 @@ fn music(package: &RecPackage, project: &Project) -> Vec<MusicSource> {
         .collect()
 }
 
-fn click_events(package: &RecPackage, project: &Project) -> Vec<events::InputEvent> {
-    let Some(path) = project
-        .takes
-        .first()
-        .and_then(|take| take.events.as_deref())
+fn click_events(package: &RecPackage, take: &Take) -> Vec<events::InputEvent> {
+    let Some(path) = take
+        .events
+        .as_deref()
         .and_then(|rel| package.resolve(rel).ok())
         .filter(|path: &PathBuf| path.exists())
     else {
