@@ -16,14 +16,23 @@ pub struct ClipTime {
 }
 
 impl Timeline {
-    /// Total timeline duration in nanoseconds.
+    /// Total timeline duration in nanoseconds. Saturating: a hand-edited
+    /// `project.json` can hold spans whose sum leaves `u64`, and that must
+    /// not panic the loader (debug) or wrap into a tiny duration (release).
     pub fn duration_ns(&self) -> u64 {
-        self.clips.iter().map(clip_len_ns).sum()
+        self.clips
+            .iter()
+            .map(clip_len_ns)
+            .fold(0, u64::saturating_add)
     }
 
     /// Timeline time at which clip `index` starts.
     pub fn clip_start_ns(&self, index: usize) -> u64 {
-        self.clips.iter().take(index).map(clip_len_ns).sum()
+        self.clips
+            .iter()
+            .take(index)
+            .map(clip_len_ns)
+            .fold(0, u64::saturating_add)
     }
 
     /// Timeline time clip `index` occupies, which is its source span scaled
@@ -91,7 +100,10 @@ pub fn frame_time_ns(index: u64, fps: u32) -> u64 {
 
 fn clip_len_ns(clip: &crate::project::Clip) -> u64 {
     let src = clip.src_out_ns.saturating_sub(clip.src_in_ns);
-    (src as f64 / f64::from(clip.speed.max(f32::EPSILON))) as u64
+    // Rounded up so the span always covers the mapping of the clip's last
+    // source nanosecond. Truncating a fractional length (speed above 1x)
+    // lets `timeline_ns_for` land that moment on the next clip's start.
+    (src as f64 / f64::from(clip.speed.max(f32::EPSILON))).ceil() as u64
 }
 
 #[cfg(test)]
@@ -145,6 +157,39 @@ mod tests {
         // Trimmed away or unknown source positions map to nothing.
         assert_eq!(timeline.timeline_ns_for(0, 500), None);
         assert_eq!(timeline.timeline_ns_for(7, 0), None);
+    }
+
+    #[test]
+    fn timeline_ns_for_should_stay_inside_the_clip_when_speed_leaves_a_remainder() {
+        // 5_001ns of source at 2x is 2_500.5ns of timeline. Truncating that
+        // length maps the clip's last source ns onto the next clip's start.
+        let timeline = Timeline {
+            clips: vec![
+                Clip {
+                    take: 0,
+                    src_in_ns: 0,
+                    src_out_ns: 5_001,
+                    speed: 2.0,
+                },
+                clip(1, 0, 2_000),
+            ],
+            ..Timeline::default()
+        };
+        let t_ns = timeline.timeline_ns_for(0, 5_000).unwrap();
+        assert!(t_ns < timeline.clip_len_ns(0));
+        assert_eq!(timeline.resolve(t_ns).unwrap().clip, 0);
+    }
+
+    #[test]
+    fn duration_should_saturate_instead_of_overflowing() {
+        // A hand-edited project can hold spans that overflow the sum; that
+        // must not panic `Project::load`.
+        let timeline = Timeline {
+            clips: vec![clip(0, 0, u64::MAX), clip(0, 0, u64::MAX)],
+            ..Timeline::default()
+        };
+        assert_eq!(timeline.duration_ns(), u64::MAX);
+        assert_eq!(timeline.clip_start_ns(2), u64::MAX);
     }
 
     #[test]
