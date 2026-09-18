@@ -173,14 +173,20 @@ fn apply_trim(session: &mut Session, drag: &TrimDrag, pointer_x: f32) {
     let Some(take) = session.project.takes.iter().find(|t| t.id == clip.take) else {
         return;
     };
-    let delta_ns = f64::from(pointer_x - drag.start_x) * drag.ns_per_px;
+    // `ns_per_px` is timeline time, the handles edit source time, and a clip
+    // covers `span / speed` of the timeline: the source has to move `speed`
+    // times as fast as the pointer.
+    let delta_ns = f64::from(pointer_x - drag.start_x) * drag.ns_per_px * f64::from(clip.speed);
     let target = (drag.start_src_ns as f64 + delta_ns).max(0.0) as u64;
     if drag.right {
-        clip.src_out_ns = super::clamp_ns(
-            target,
-            clip.src_in_ns.saturating_add(MIN_CLIP_NS),
-            take.duration_ns,
-        );
+        // A take shorter than the minimum clip length leaves no room for
+        // both bounds. The take end wins, so the clip can never point past
+        // its own media (which autosave would then persist).
+        let earliest = clip
+            .src_in_ns
+            .saturating_add(MIN_CLIP_NS)
+            .min(take.duration_ns);
+        clip.src_out_ns = target.clamp(earliest, take.duration_ns);
     } else {
         clip.src_in_ns = target.min(clip.src_out_ns.saturating_sub(MIN_CLIP_NS));
     }

@@ -98,6 +98,13 @@ impl Waveforms {
     fn get(&self, rel: &str) -> Option<&AudioPeaks> {
         self.peaks.get(rel)?.as_ref()
     }
+
+    /// Is the worker still to answer for `rel`? A failed decode stores an
+    /// empty result, which `get` cannot tell from a job still running, so
+    /// the lane would otherwise read "Analyzing" forever.
+    fn pending(&self, rel: &str) -> bool {
+        !self.peaks.contains_key(rel)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +215,11 @@ fn paint_track(
             painter.text(
                 pos2(body.min.x + 8.0, body.center().y),
                 Align2::LEFT_CENTER,
-                "Analyzing\u{2026}",
+                if state.waveforms.pending(&music.file) {
+                    "Analyzing\u{2026}"
+                } else {
+                    "No waveform"
+                },
                 FontId::new(10.0, FontFamily::Proportional),
                 theme::TEXT_MUTED,
             );

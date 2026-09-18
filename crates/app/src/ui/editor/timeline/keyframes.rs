@@ -65,7 +65,10 @@ pub(super) fn show(
         let min_x = track.x_at(segment.in_ns).min(track.left + track.width);
         let max_x = track.x_at(segment.out_ns).min(track.left + track.width);
         let body = Rect::from_min_max(pos2(min_x, lane.min.y + 5.0), pos2(max_x, lane.max.y - 5.0));
-        if body.width() < 2.0 {
+        // Only skip segments with no width at all: on a long timeline a
+        // valid 200ms segment is thinner than a pixel, and skipping it would
+        // leave it impossible to select, resize or delete.
+        if body.width() <= 0.0 {
             continue;
         }
         paint_segment(ui, session, index, body, state.selected_zoom == Some(index));
@@ -246,37 +249,39 @@ fn apply_drag(session: &mut Session, drag: &ZoomDrag, pointer_x: f32, ns_per_px:
     match drag.part {
         DragPart::Body => {
             let len = drag.start_out_ns - drag.start_in_ns;
+            // The gap between neighbours can be shorter than the segment
+            // (a trim shortened the timeline). Moving must never resize, so
+            // refuse the drag rather than squeeze the segment into the gap:
+            // squeezing loses length the user never asked to give up.
+            if next_start.saturating_sub(prev_end) < len {
+                return;
+            }
             let in_ns = super::clamp_ns(
                 shifted(drag.start_in_ns),
                 prev_end,
                 next_start.saturating_sub(len),
             );
-            // The gap between neighbours can be shorter than the segment
-            // (a trim shortened the timeline), in which case clamping the
-            // start alone would push the end past the next segment. That
-            // breaks the non-overlapping invariant the renderers rely on,
-            // and `sanitize_zoom` would drop the segment on the next load
-            // with nothing shown to the user. Clamp the end too, and leave
-            // the segment alone when there is no room at all.
-            let out_ns = (in_ns + len).min(next_start);
-            if out_ns > in_ns {
-                segment.in_ns = in_ns;
-                segment.out_ns = out_ns;
-            }
+            segment.in_ns = in_ns;
+            segment.out_ns = in_ns + len;
         }
         DragPart::Left => {
-            segment.in_ns = super::clamp_ns(
-                shifted(drag.start_in_ns),
-                prev_end,
-                segment.out_ns.saturating_sub(MIN_SEGMENT_NS),
-            );
+            // A trim can leave `out_ns` past the end of the timeline. Cap
+            // the start against the duration too, otherwise it can be
+            // dragged past the visible end and `sanitize_zoom` drops the
+            // segment on the next load with nothing shown to the user.
+            let latest = segment.out_ns.min(duration).saturating_sub(MIN_SEGMENT_NS);
+            if latest >= prev_end {
+                segment.in_ns = super::clamp_ns(shifted(drag.start_in_ns), prev_end, latest);
+            }
         }
         DragPart::Right => {
-            segment.out_ns = super::clamp_ns(
-                shifted(drag.start_out_ns),
-                segment.in_ns.saturating_add(MIN_SEGMENT_NS),
-                next_start,
-            );
+            // A segment (or the gap to the next one) shorter than the
+            // minimum length has no valid end: growing to the minimum would
+            // overlap the neighbour, so leave the segment as it is.
+            let earliest = segment.in_ns.saturating_add(MIN_SEGMENT_NS);
+            if earliest <= next_start {
+                segment.out_ns = super::clamp_ns(shifted(drag.start_out_ns), earliest, next_start);
+            }
         }
     }
 }
