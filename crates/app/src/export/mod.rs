@@ -9,7 +9,7 @@
 pub mod plan;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -60,11 +60,13 @@ pub enum Preset {
 
 impl Preset {
     /// Short side of the output in pixels; the ratio sets the other.
-    pub fn short_side(self, take_h: u32) -> u32 {
+    /// `take_short` is the source's short side, so a portrait take does not
+    /// export at its long side.
+    pub fn short_side(self, take_short: u32) -> u32 {
         match self {
             Self::P1080 => 1080,
             Self::P1440 => 1440,
-            Self::Source => take_h.max(2),
+            Self::Source => take_short.max(2),
         }
     }
 
@@ -96,7 +98,16 @@ pub struct ExportJob {
     rx: Receiver<Progress>,
     cancel: Arc<AtomicBool>,
     latest: Progress,
-    dest: PathBuf,
+    partial: PathBuf,
+}
+
+/// Where the encoder actually writes: a sibling of the destination, renamed
+/// over it only once the whole export succeeded. A cancelled, failed or
+/// panicked export therefore never touches a file that was already there.
+/// The `.mp4` suffix stays, because ffmpeg picks the muxer from it.
+fn partial_path(dest: &Path) -> PathBuf {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    dest.with_file_name(format!(".{name}.part.mp4"))
 }
 
 impl ExportJob {
@@ -108,7 +119,7 @@ impl ExportJob {
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let dest = settings.dest.clone();
+        let partial = partial_path(&settings.dest);
         let total = frame_count(
             project.timeline.duration_ns(),
             project.primary_take().map_or(30, |take| take.fps),
@@ -152,7 +163,7 @@ impl ExportJob {
                 total,
                 finished: None,
             },
-            dest,
+            partial,
         }
     }
 
@@ -176,7 +187,7 @@ impl ExportJob {
                 // settings view, which is gated on the job being finished.
                 Err(TryRecvError::Disconnected) => {
                     if self.latest.finished.is_none() {
-                        let _ = std::fs::remove_file(&self.dest);
+                        let _ = std::fs::remove_file(&self.partial);
                         self.latest.finished =
                             Some(Err("the export worker stopped unexpectedly".to_owned()));
                     }
@@ -199,6 +210,11 @@ fn run(
     tx: &Sender<Progress>,
     cancel: &AtomicBool,
 ) -> Result<PathBuf, JobError> {
+    // Writing inside the package would overwrite the recording the export
+    // reads from, and the media is meant to stay immutable.
+    if settings.dest.starts_with(package.root()) {
+        return Err("choose a destination outside the .rec package".into());
+    }
     let take = project
         .primary_take()
         .ok_or("timeline references no take")?;
@@ -213,11 +229,12 @@ fn run(
 
     let (width, height) = layout::output_size(
         &project.style.ratio,
-        settings.preset.short_side(take.height),
+        settings.preset.short_side(take.width.min(take.height)),
     );
     let (system_audio, music) = plan::audio_sources(package, project);
+    let partial = partial_path(&settings.dest);
     let mut exporter = Exporter::create(
-        &settings.dest,
+        &partial,
         &ExportConfig {
             width,
             height,
@@ -242,7 +259,7 @@ fn run(
             return Err("export cancelled".into());
         }
         // Any failure past this point must take the half-written file with
-        // it: the destination is a path the user picked, not a temp file.
+        // it; `abort` removes the partial the exporter owns.
         match compose_frame(
             &mut exporter,
             &mut compositor,
@@ -264,15 +281,21 @@ fn run(
             finished: None,
         });
     }
-    exporter_finish(exporter, &settings.dest)?;
+    exporter_finish(exporter, &partial)?;
+    // Same directory, so this is a rename on one filesystem: the destination
+    // either keeps its old content or becomes the finished export.
+    std::fs::rename(&partial, &settings.dest).map_err(|e| {
+        let _ = std::fs::remove_file(&partial);
+        JobError::from(e)
+    })?;
     Ok(settings.dest.clone())
 }
 
 /// Close the encoder, removing the half-written file if the trailer never
 /// lands.
-fn exporter_finish(exporter: Exporter, dest: &std::path::Path) -> Result<(), JobError> {
+fn exporter_finish(exporter: Exporter, partial: &Path) -> Result<(), JobError> {
     exporter.finish().map_err(|e| {
-        let _ = std::fs::remove_file(dest);
+        let _ = std::fs::remove_file(partial);
         JobError::from(e)
     })
 }

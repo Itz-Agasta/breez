@@ -146,7 +146,12 @@ impl BreezApp {
         match opened {
             Ok((_, package, project)) => {
                 let session = Session { package, project };
-                self.editor = Some(EditorState::new(ctx, &session));
+                let mut editor = EditorState::new(ctx, &session);
+                // Decode the opening frame straight away, so the canvas shows
+                // the take instead of the metadata placeholder until the
+                // first play or scrub.
+                editor.player.seek(&session, 0);
+                self.editor = Some(editor);
                 self.session = Some(session);
                 self.error = None;
                 self.mode = Mode::Edit;
@@ -162,10 +167,14 @@ impl BreezApp {
             return;
         };
         if editor.dirty && !ctx.input(|i| i.pointer.any_down()) {
-            editor.dirty = false;
-            if let Err(e) = session.project.save(&session.package) {
-                log::error!("save project: {e}");
-                self.error = Some(format!("save project: {e}"));
+            // Only a written project is a saved one: clearing `dirty` on a
+            // failed write would drop the edits on the next load.
+            match session.project.save(&session.package) {
+                Ok(()) => editor.dirty = false,
+                Err(e) => {
+                    log::error!("save project: {e}");
+                    self.error = Some(format!("save project: {e}"));
+                }
             }
         }
     }

@@ -86,13 +86,13 @@ impl State {
 
         // The take export will actually render, not takes.first(): a package
         // can hold takes the timeline never uses.
-        let take_height = session
+        let take_short = session
             .project
             .primary_take()
-            .map_or(1080, |take| take.height);
+            .map_or(1080, |take| take.width.min(take.height));
         let (width, height) = layout::output_size(
             &session.project.style.ratio,
-            PRESETS[self.preset].short_side(take_height),
+            PRESETS[self.preset].short_side(take_short),
         );
         ui.add_space(6.0);
         ui.label(
@@ -169,6 +169,9 @@ impl State {
         if let Some(outcome) = finished {
             self.job = None;
             self.result = Some(outcome);
+            // Nothing else asks for a frame once the job is gone, so without
+            // this the modal keeps showing "Exporting" until the next input.
+            ui.ctx().request_repaint();
             return;
         }
 
@@ -246,8 +249,13 @@ impl State {
         };
         self.picker = None;
         if let Some(mut path) = picked {
-            // The portal's "All files" option can bypass the dialog filter.
-            if path.extension().is_none() {
+            // The portal's "All files" option can bypass the dialog filter,
+            // and the exporter only writes MP4, so force the extension
+            // rather than failing on a container we cannot produce.
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("mp4"))
+            {
                 path.set_extension("mp4");
             }
             self.dest = Some(path);
