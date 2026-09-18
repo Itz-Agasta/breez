@@ -42,7 +42,8 @@ pub struct Player {
     decoder_pos: Option<(u32, u64)>,
     playing: bool,
     playhead_ns: u64,
-    current_clip: Option<usize>,
+    /// Source mapping playback is positioned for, see [`clip_mapping`].
+    current_clip: Option<ClipMapping>,
     /// Wallclock fallback anchor: (instant, playhead at that instant).
     wall_anchor: Option<(Instant, u64)>,
     /// Timeline offset of the audio source: playhead = offset + audio pos.
@@ -108,7 +109,7 @@ impl Player {
         self.position_for(session, ct);
         self.playing = true;
         self.wall_anchor = Some((Instant::now(), self.playhead_ns));
-        if let Some(audio) = &self.audio {
+        if let Some(audio) = &mut self.audio {
             audio.set_volume(self.volume);
             audio.play();
         }
@@ -172,7 +173,7 @@ impl Player {
     pub fn set_volume(&mut self, volume: f32) {
         if (volume - self.volume).abs() > f32::EPSILON {
             self.volume = volume;
-            if let Some(audio) = &self.audio {
+            if let Some(audio) = &mut self.audio {
                 audio.set_volume(volume);
             }
         }
@@ -195,8 +196,9 @@ impl Player {
 
         let target = self.playhead_ns.min(duration.saturating_sub(1));
         if let Some(ct) = resolve(session, target) {
-            // Crossing into another clip repositions decoder + audio.
-            if self.playing && self.current_clip != Some(ct.clip) {
+            // Crossing into another clip, or editing the one playing,
+            // repositions decoder + audio.
+            if self.playing && self.current_clip != clip_mapping(session, ct.clip) {
                 self.position_for(session, ct);
                 if let Some(audio) = &self.audio {
                     audio.play();
@@ -286,7 +288,7 @@ impl Player {
     /// Point decoder and audio at `ct` (used by play, playing-seek, and clip
     /// transitions).
     fn position_for(&mut self, session: &Session, ct: ClipTime) {
-        self.current_clip = Some(ct.clip);
+        self.current_clip = clip_mapping(session, ct.clip);
         let near = self.decoder_pos.is_some_and(|(take, pos)| {
             let fps = take_of(session, ct.take).map_or(60, |t| t.fps);
             take == ct.take && pos.abs_diff(ct.src_ns) <= 500_000_000 / u64::from(fps)
@@ -357,6 +359,26 @@ impl Player {
             }
         }
     }
+}
+
+/// Everything `Timeline::resolve` uses to map timeline time to source time
+/// inside one clip: its index, the timeline time it starts at, its source
+/// in-point and its speed.
+type ClipMapping = (usize, u64, u64, f32);
+
+/// The mapping clip `index` currently has. Trimming the playing clip (or one
+/// before it) changes this while the index stays the same, so a playback
+/// position that tracked the index alone would keep running from the source
+/// position the old trim resolved to.
+fn clip_mapping(session: &Session, index: usize) -> Option<ClipMapping> {
+    let timeline = &session.project.timeline;
+    let clip = timeline.clips.get(index)?;
+    Some((
+        index,
+        timeline.clip_start_ns(index),
+        clip.src_in_ns,
+        clip.speed,
+    ))
 }
 
 fn resolve(session: &Session, t_ns: u64) -> Option<ClipTime> {

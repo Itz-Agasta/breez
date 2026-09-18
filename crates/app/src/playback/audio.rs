@@ -15,6 +15,10 @@ pub struct AudioOut {
     device: MixerDeviceSink,
     player: Option<rodio::Player>,
     loaded: Option<PathBuf>,
+    /// Gain to give every player this loads: a fresh rodio player starts at
+    /// 1.0, so a take loaded mid-playback would ignore the configured
+    /// system-audio volume.
+    volume: f32,
 }
 
 impl AudioOut {
@@ -30,6 +34,7 @@ impl AudioOut {
                     device,
                     player: None,
                     loaded: None,
+                    volume: 1.0,
                 })
             }
             Err(e) => {
@@ -42,8 +47,14 @@ impl AudioOut {
     /// Make `path` the loaded source (idempotent). Returns false when the
     /// file cannot be decoded.
     pub fn load(&mut self, path: &Path) -> bool {
-        if self.loaded.as_deref() == Some(path) {
-            return self.player.is_some();
+        // Only a player that still has audio queued can be reused. One that
+        // played the take to its end is spent (seeking it is a no-op, so
+        // replaying would run silent), and a failed load left none at all,
+        // which a later attempt should redo rather than cache forever.
+        if self.loaded.as_deref() == Some(path)
+            && self.player.as_ref().is_some_and(|player| !player.empty())
+        {
+            return true;
         }
         // Dropping the old player stops it; clear() would block the UI.
         self.player = None;
@@ -63,6 +74,7 @@ impl AudioOut {
         };
         let player = rodio::Player::connect_new(self.device.mixer());
         player.pause();
+        player.set_volume(self.volume);
         player.append(source);
         self.player = Some(player);
         true
@@ -101,7 +113,8 @@ impl AudioOut {
         }
     }
 
-    pub fn set_volume(&self, volume: f32) {
+    pub fn set_volume(&mut self, volume: f32) {
+        self.volume = volume;
         if let Some(player) = &self.player {
             player.set_volume(volume);
         }

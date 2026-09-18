@@ -27,6 +27,12 @@ struct TrackPlayer {
     player: Option<rodio::Player>,
     /// Decoding this file failed; don't retry every frame.
     failed: bool,
+    /// Source position at which the player last ran dry. A file shorter than
+    /// the span the envelope thinks it covers (its length is unknown until
+    /// the waveform pass fills `duration_ns`) would otherwise be decoded
+    /// again on every tick; only a playhead back before this point, which
+    /// does have audio left to play, reloads it.
+    ended_ns: Option<u64>,
     /// Consecutive seek failures. A seek can fail transiently (a player that
     /// just ran dry, a format that needs a fresh decoder), so those drop the
     /// player and reload rather than muting the track for the session; only
@@ -85,7 +91,19 @@ impl TrackPlayer {
         if self.failed {
             return;
         }
-        if self.player.as_ref().is_none_or(|p| p.empty()) {
+        if let Some(player) = &self.player
+            && player.empty()
+        {
+            self.ended_ns = Some(player.get_pos().as_nanos() as u64);
+            self.player = None;
+        }
+        if self.ended_ns.is_some_and(|end| src_ns >= end) {
+            // The source is simply over; reloading it would decode the file
+            // only to run dry again.
+            return;
+        }
+        self.ended_ns = None;
+        if self.player.is_none() {
             // First use, or the source ran out (a seek back past the end of
             // a fully played track needs a fresh decoder).
             self.player = self.load(audio, session, &track.file);
