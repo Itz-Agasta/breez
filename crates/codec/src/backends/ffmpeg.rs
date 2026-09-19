@@ -3,16 +3,25 @@
 //! Encoders are ffmpeg child processes fed rawvideo/pcm over stdin, writing
 //! fragmented MP4 (`frag_keyframe+empty_moov`) so a crash loses at most the
 //! last fragment. Keyframe every second (`-g fps`) keeps scrubbing cheap.
+//! Decoders are the reverse: `-ss` input seek, rawvideo RGBA on stdout,
+//! frames parsed by the sidecar's event iterator (which needs ffmpeg's
+//! default loglevel to read stream metadata, so decode never lowers it).
 
 use std::io::Write;
 use std::path::Path;
 use std::process::ChildStdin;
+use std::sync::Arc;
 
 use ffmpeg_sidecar::child::FfmpegChild;
 use ffmpeg_sidecar::command::FfmpegCommand;
+use ffmpeg_sidecar::event::{FfmpegEvent, LogLevel};
+use ffmpeg_sidecar::iter::FfmpegIterator;
 
 use crate::CodecError;
+use crate::backends::graph;
+use crate::decoder::VideoFrame;
 use crate::encoder::{AudioEncoderConfig, PixelFormat, VideoEncoderConfig};
+use crate::export::ExportConfig;
 
 pub(crate) fn ensure_available() -> Result<(), CodecError> {
     ffmpeg_sidecar::download::auto_download().map_err(|e| CodecError::Backend(e.to_string()))
@@ -21,6 +30,14 @@ pub(crate) fn ensure_available() -> Result<(), CodecError> {
 pub(crate) struct FfmpegSink {
     child: FfmpegChild,
     stdin: Option<ChildStdin>,
+    /// Drains ffmpeg's stderr for the life of the process.
+    ///
+    /// `FfmpegCommand` pipes stderr whether or not anyone reads it. Nothing
+    /// here does, so on a damaged input ffmpeg can fill the ~64KB pipe
+    /// buffer, block on the write, and never exit - leaving `wait()` below
+    /// blocked for good and, on the export path, the worker thread hung at
+    /// 100% with Cancel already out of the loop that polls it.
+    stderr: Option<std::thread::JoinHandle<String>>,
 }
 
 impl FfmpegSink {
@@ -102,10 +119,20 @@ impl FfmpegSink {
         let stdin = child
             .take_stdin()
             .ok_or_else(|| CodecError::Backend("ffmpeg stdin unavailable".to_owned()))?;
+        let stderr = child.take_stderr().map(drain_stderr);
         Ok(Self {
             child,
             stdin: Some(stdin),
+            stderr,
         })
+    }
+
+    /// Whatever ffmpeg logged, once it has exited.
+    fn stderr_text(&mut self) -> String {
+        self.stderr
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default()
     }
 
     pub(crate) fn write(&mut self, data: &[u8]) -> Result<(), CodecError> {
@@ -125,7 +152,11 @@ impl FfmpegSink {
         if status.success() {
             Ok(())
         } else {
-            Err(CodecError::Backend(format!("ffmpeg exited with {status}")))
+            let detail = self.stderr_text();
+            Err(CodecError::Backend(format!(
+                "ffmpeg exited with {status}: {}",
+                detail.trim()
+            )))
         }
     }
 }
@@ -138,5 +169,244 @@ impl Drop for FfmpegSink {
         drop(self.stdin.take());
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// One export process: rawvideo RGBA on stdin plus every audio file as an
+/// extra input, muxed to a faststart MP4. `-shortest` is deliberately
+/// absent: the video pipe defines the length and the audio graph is already
+/// trimmed to the timeline.
+pub(crate) fn spawn_export(dest: &Path, config: &ExportConfig) -> Result<FfmpegSink, CodecError> {
+    let mut cmd = FfmpegCommand::new();
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-s",
+        &format!("{}x{}", config.width, config.height),
+        "-r",
+        &config.fps.to_string(),
+        "-i",
+        "pipe:0",
+    ]);
+    // Same decision the filter graph makes, so input indices cannot desync.
+    if let Some(system) = graph::effective_system(config) {
+        cmd.arg("-i");
+        cmd.arg(&system.path);
+    }
+    for track in &config.music {
+        cmd.arg("-i");
+        cmd.arg(&track.path);
+    }
+    match graph::filter_graph(config) {
+        Some(graph) => {
+            cmd.args(["-filter_complex", &graph, "-map", "0:v", "-map", "[aout]"]);
+            cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+        }
+        None => {
+            cmd.args(["-map", "0:v", "-an"]);
+        }
+    }
+    cmd.args([
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        &config.crf.to_string(),
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-y",
+    ]);
+    cmd.arg(dest);
+    FfmpegSink::spawn(cmd)
+}
+
+/// Read a child's stderr to EOF on its own thread, so the pipe can never
+/// fill and block the child.
+fn drain_stderr<R: std::io::Read + Send + 'static>(
+    mut stderr: R,
+) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    })
+}
+
+/// One decode process streaming RGBA frames from `start_ns` onward. Seeking
+/// means dropping this and spawning a new one (`-ss` input seek lands on a
+/// keyframe then decodes accurately to the target; capture encodes a
+/// keyframe every second, so respawn stays cheap).
+pub(crate) struct FfmpegFrameSource {
+    child: FfmpegChild,
+    events: FfmpegIterator,
+    start_ns: u64,
+    yielded_any: bool,
+}
+
+impl FfmpegFrameSource {
+    pub(crate) fn spawn(path: &Path, start_ns: u64) -> Result<Self, CodecError> {
+        let mut cmd = FfmpegCommand::new();
+        cmd.args(["-ss", &format!("{:.6}", start_ns as f64 / 1e9), "-i"]);
+        cmd.arg(path);
+        cmd.args(["-an", "-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
+        let mut child = cmd.spawn()?;
+        let events = child
+            .iter()
+            .map_err(|e| CodecError::Backend(e.to_string()))?;
+        Ok(Self {
+            child,
+            events,
+            start_ns,
+            yielded_any: false,
+        })
+    }
+
+    /// Next decoded frame, or `None` at end of stream. Errors before the
+    /// first frame surface as `Err`; errors after that end the stream (the
+    /// frames already decoded are valid).
+    pub(crate) fn next_frame(&mut self) -> Result<Option<VideoFrame>, CodecError> {
+        let mut last_error = None;
+        for event in self.events.by_ref() {
+            match event {
+                FfmpegEvent::OutputFrame(frame) => {
+                    self.yielded_any = true;
+                    return Ok(Some(VideoFrame {
+                        data: Arc::from(frame.data),
+                        width: frame.width,
+                        height: frame.height,
+                        pts_ns: self.start_ns + (f64::from(frame.timestamp) * 1e9) as u64,
+                    }));
+                }
+                FfmpegEvent::Error(e) | FfmpegEvent::Log(LogLevel::Error, e) => {
+                    last_error = Some(e);
+                }
+                _ => {}
+            }
+        }
+        match last_error {
+            Some(e) if !self.yielded_any => Err(CodecError::Backend(e)),
+            _ => Ok(None),
+        }
+    }
+}
+
+impl Drop for FfmpegFrameSource {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Decode an audio file to low-rate mono PCM and fold it into one peak
+/// (max absolute sample) per `1/peaks_per_sec` bucket. Blocking; run on a
+/// worker thread. `-loglevel error` keeps the unread stderr pipe from
+/// filling while stdout is drained (peaks never use the event iterator).
+pub(crate) fn run_peaks(
+    audio: &Path,
+    peaks_per_sec: u32,
+) -> Result<crate::peaks::AudioPeaks, CodecError> {
+    const SAMPLE_RATE: u32 = 8_000;
+    let mut cmd = FfmpegCommand::new();
+    cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
+    cmd.arg(audio);
+    cmd.args([
+        "-map",
+        "0:a:0",
+        "-ac",
+        "1",
+        "-ar",
+        &SAMPLE_RATE.to_string(),
+        "-f",
+        "f32le",
+        "-",
+    ]);
+    let mut child = cmd.spawn()?;
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| CodecError::Backend("ffmpeg stdout unavailable".to_owned()))?;
+    // Drained alongside stdout: reading it only after `wait()` deadlocks if
+    // ffmpeg fills the stderr pipe while we are still reading samples.
+    let stderr = child.take_stderr().map(drain_stderr);
+
+    let bucket_len = (SAMPLE_RATE / peaks_per_sec.max(1)).max(1) as u64;
+    let mut peaks = Vec::new();
+    let mut bucket_peak = 0f32;
+    let mut samples = 0u64;
+    let mut reader = std::io::BufReader::with_capacity(1 << 16, stdout);
+    let mut raw = [0u8; 4];
+    while std::io::Read::read_exact(&mut reader, &mut raw).is_ok() {
+        bucket_peak = bucket_peak.max(f32::from_le_bytes(raw).abs().min(1.0));
+        samples += 1;
+        if samples.is_multiple_of(bucket_len) {
+            peaks.push(bucket_peak);
+            bucket_peak = 0.0;
+        }
+    }
+    if !samples.is_multiple_of(bucket_len) {
+        peaks.push(bucket_peak);
+    }
+
+    let status = child.wait()?;
+    let detail = stderr
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    if !status.success() || samples == 0 {
+        return Err(CodecError::Backend(format!(
+            "peaks decode failed ({status}): {}",
+            detail.trim()
+        )));
+    }
+    Ok(crate::peaks::AudioPeaks {
+        duration_ns: samples * 1_000_000_000 / u64::from(SAMPLE_RATE),
+        peaks_per_sec,
+        peaks,
+    })
+}
+
+/// Decode `count` evenly spaced frames into `%03d.jpg` thumbnails under
+/// `out_dir`. Blocking; run on a worker thread.
+pub(crate) fn run_thumbs(
+    video: &Path,
+    out_dir: &Path,
+    count: u32,
+    width: u32,
+    duration_ns: u64,
+) -> Result<(), CodecError> {
+    let duration_s = (duration_ns as f64 / 1e9).max(0.001);
+    let mut cmd = FfmpegCommand::new();
+    cmd.arg("-i");
+    cmd.arg(video);
+    cmd.args([
+        "-vf",
+        &format!("fps={:.6},scale={width}:-2", f64::from(count) / duration_s),
+        "-frames:v",
+        &count.to_string(),
+        "-q:v",
+        "4",
+        "-y",
+    ]);
+    cmd.arg(out_dir.join("%03d.jpg"));
+    let mut child = cmd.spawn()?;
+    let errors: Vec<String> = child
+        .iter()
+        .map_err(|e| CodecError::Backend(e.to_string()))?
+        .filter_errors()
+        .collect();
+    let status = child.wait()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CodecError::Backend(format!(
+            "thumbs ffmpeg exited with {status}: {}",
+            errors.join("; ")
+        )))
     }
 }

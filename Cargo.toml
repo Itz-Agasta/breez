@@ -27,6 +27,10 @@ ffmpeg-sidecar = "2"
 rdev = "0.5"
 egui = "0.35"
 eframe = "0.35"
+rfd = "0.17"
+rodio = "0.22"
+rayon = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 breez-core = { path = "crates/core" }
 breez-codec = { path = "crates/codec" }

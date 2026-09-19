@@ -7,7 +7,17 @@ license.workspace = true
 
 [dependencies]
 breez-capture.workspace = true
+breez-codec.workspace = true
 breez-core.workspace = true
+breez-render.workspace = true
+crossbeam-channel.workspace = true
 eframe.workspace = true
 egui.workspace = true
 env_logger.workspace = true
+image.workspace = true
+log.workspace = true
+rfd.workspace = true
+rodio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

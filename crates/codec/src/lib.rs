@@ -1,15 +1,24 @@
 //! breez-codec: encode and decode media through our own API.
 //!
-//! Public surface is Breez types only (`VideoEncoder`, `AudioEncoder`, and
-//! later the decoders). ffmpeg-sidecar is the first backend and is confined
-//! to `backends/ffmpeg.rs`; no ffmpeg type may appear in a public signature.
+//! Public surface is Breez types only (`VideoEncoder`, `AudioEncoder`,
+//! `VideoDecoder`, thumbnails). ffmpeg-sidecar is the first backend and is
+//! confined to `backends/ffmpeg.rs`; no ffmpeg type may appear in a public
+//! signature.
 
 mod backends;
+pub mod decoder;
 pub mod encoder;
+pub mod export;
+pub mod peaks;
+pub mod thumbs;
 
+pub use decoder::{SequentialReader, VideoDecoder, VideoFrame};
 pub use encoder::{
     AudioEncoder, AudioEncoderConfig, PixelFormat, VideoEncoder, VideoEncoderConfig,
 };
+pub use export::{AudioClip, ExportConfig, Exporter, MusicSource, SystemAudio};
+pub use peaks::{AudioPeaks, generate_peaks};
+pub use thumbs::generate_thumbs;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {

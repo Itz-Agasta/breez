@@ -6,6 +6,8 @@ Breez is a lightweight, opinionated screen recorder and demo editor for develope
 
 **Workflow:** Record -> Trim -> Zoom & pan -> Style background -> Music -> Export
 
+> **Status:** early development. The full Record -> Trim -> Zoom -> Music -> Export path is implemented and verified headlessly; the editor UI for it is still being exercised by hand, so expect rough edges. Undo/redo and crash recovery are not built yet (see the roadmap below).
+
 [![CI](https://github.com/Itz-Agasta/breez/actions/workflows/ci.yml/badge.svg)](https://github.com/Itz-Agasta/breez/actions/workflows/ci.yml)
 ![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)
@@ -27,7 +29,7 @@ MyDemo.rec/
   project.json           # timeline + style (the only file edits touch)
   media/
     screen/take-000.mp4  # fragmented MP4 video, crash-recoverable
-    audio/system-000.m4a # AAC system audio
+    audio/take-000.m4a   # AAC system audio
     music/               # imported tracks (copied in, self-contained)
   events/
     input-000.jsonl      # normalized mouse/keyboard events
@@ -83,10 +85,10 @@ cargo test --workspace
 - [x] Workspace scaffold, CI, frameless themed window
 - [x] Headless capture core: screen + system audio -> `.rec`
 - [x] Record flow + editor shell
-- [ ] Playback, scrubbing, and trim
-- [ ] Zoom & pan keyframes with cursor-follow
-- [ ] Music import, waveforms, fades
-- [ ] MP4 export (H.264 + AAC, hardware encode when available)
+- [x] Playback, scrubbing, and trim
+- [x] Zoom & pan keyframes with cursor-follow
+- [x] Music import, waveforms, fades
+- [x] MP4 export (H.264 + AAC; hardware encode still to come)
 - [ ] Polish: undo/redo, autosave, crash recovery flow
 
 Post-MVP: microphone/voiceover, camera bubble, re-rendered cursor, captions, GIF/WebM export.

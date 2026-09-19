@@ -22,6 +22,7 @@ pub struct TitlebarState<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TitlebarAction {
     SetMode(Mode),
+    Export,
 }
 
 pub fn show(root: &mut Ui, state: &TitlebarState<'_>) -> Option<TitlebarAction> {
@@ -35,7 +36,7 @@ pub fn show(root: &mut Ui, state: &TitlebarState<'_>) -> Option<TitlebarAction> 
             drag_region(ui, bar_rect);
             left_section(ui, bar_rect, state);
             action = mode_toggle(ui, bar_rect, state);
-            right_section(ui, bar_rect);
+            action = right_section(ui, bar_rect, state).or(action);
             ui.painter().hline(
                 bar_rect.x_range(),
                 bar_rect.bottom(),
@@ -118,7 +119,7 @@ fn mode_toggle(ui: &mut Ui, bar_rect: Rect, state: &TitlebarState<'_>) -> Option
     action
 }
 
-fn right_section(ui: &mut Ui, bar_rect: Rect) {
+fn right_section(ui: &mut Ui, bar_rect: Rect, state: &TitlebarState<'_>) -> Option<TitlebarAction> {
     let rect = bar_rect.shrink2(vec2(10.0, 0.0));
     let mut ui = ui.new_child(
         UiBuilder::new()
@@ -135,9 +136,10 @@ fn right_section(ui: &mut Ui, bar_rect: Rect) {
         ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
     }
     ui.add_space(10.0);
-    widgets::button::primary(&mut ui, "Export", false).on_hover_text("Export lands in Phase 6");
+    let export = widgets::button::primary(&mut ui, "Export", state.can_edit).clicked();
     ui.add_space(6.0);
     widgets::button::ghost(&mut ui, "Share", false).on_hover_text("Sharing lands post-MVP");
+    export.then_some(TitlebarAction::Export)
 }
 
 /// 28px square icon button; `danger` gets the red close hover.

@@ -150,11 +150,18 @@ fn run_capture(
         while !stop.load(Ordering::Relaxed) {
             match session.next_event(Some(Duration::from_millis(100))) {
                 Ok(CaptureEvent::Video(frame)) => {
-                    video.push(&frame)?;
+                    // Anchored before the push, not after: on the first
+                    // frame `push` spawns ffmpeg and then blocks writing a
+                    // whole RGBA frame (14.7MB at 1440p) through a 64KB
+                    // pipe. Taking the instant afterwards folded all of that
+                    // startup latency into every event timestamp in the
+                    // take, so clicks rendered that far after the pixels
+                    // they belong to.
                     anchor.get_or_init(Instant::now);
                     display_size.get_or_init(|| (frame.width, frame.height));
+                    video.push(&frame)?;
                 }
-                Ok(CaptureEvent::Audio(frame)) => audio.push(&frame)?,
+                Ok(CaptureEvent::Audio(frame)) => audio.push(&frame, video.anchor_ns())?,
                 Ok(CaptureEvent::Gap(gap)) => {
                     // Video slots refill from the last frame automatically;
                     // audio refills with silence on the next packet.
@@ -306,6 +313,12 @@ impl<'a> VideoStream<'a> {
         Ok(())
     }
 
+    /// Stream time of the first video frame, once one has arrived. This is
+    /// the take's t=0, and audio is aligned to it.
+    fn anchor_ns(&self) -> Option<i64> {
+        self.encoder.is_some().then_some(self.start_ns)
+    }
+
     fn finish(self) -> Result<(VideoSummary, String), CaptureError> {
         let Some(encoder) = self.encoder else {
             return Err(CaptureError::Unsupported(
@@ -336,10 +349,22 @@ struct AudioStream<'a> {
     sample_rate: u32,
     channels: u16,
     expected_ns: Option<i64>,
+    /// Newest packet seen while the anchor was still unknown, as
+    /// `(stream_time_ns, interleaved f32 bytes)`. `next_event` hands out
+    /// pending audio ahead of video, so the packet the first video frame
+    /// lands inside is normally the last one to arrive anchorless; only its
+    /// leading samples precede the take. Earlier ones precede it entirely
+    /// and are dropped, which keeps this to one packet.
+    pending: Option<(i64, Vec<u8>)>,
     packets: u64,
 }
 
 const AUDIO_GAP_TOLERANCE_NS: i64 = 20_000_000;
+/// Longest dropout worth filling with silence. Real gaps are far shorter;
+/// anything past this is a clock anomaly (backend restart, suspend), and
+/// writing it out would push gigabytes of zeros through the encoder while
+/// the recording appears frozen. Past the cap the stream resyncs instead.
+const MAX_SILENCE_NS: i64 = 30_000_000_000;
 
 impl<'a> AudioStream<'a> {
     fn new(package: &'a RecPackage, take_id: u32) -> Self {
@@ -350,11 +375,24 @@ impl<'a> AudioStream<'a> {
             sample_rate: 0,
             channels: 0,
             expected_ns: None,
+            pending: None,
             packets: 0,
         }
     }
 
-    fn push(&mut self, frame: &pinray::AudioFrame) -> Result<(), CaptureError> {
+    /// Append one packet, aligned to the take's video anchor.
+    ///
+    /// Both streams timestamp off the same monotonic clock, but they start
+    /// at different moments: the first video frame usually lags the first
+    /// audio packet (portal negotiation on Wayland, first-frame latency on
+    /// X11). Writing the first packet at m4a time 0 regardless would bake
+    /// that skew into every take, so audio before the anchor is dropped and
+    /// a later start is padded with real silence.
+    fn push(
+        &mut self,
+        frame: &pinray::AudioFrame,
+        anchor_ns: Option<i64>,
+    ) -> Result<(), CaptureError> {
         if frame.sample_format != pinray::SampleFormat::F32 {
             return Err(CaptureError::Unsupported(format!(
                 "audio sample format {:?}",
@@ -364,6 +402,15 @@ impl<'a> AudioStream<'a> {
         let bytes = match &frame.data {
             pinray::AudioData::Interleaved(b) => b.clone(),
             pinray::AudioData::Planar(planes) => interleave_f32(planes),
+        };
+        // No video yet, so the anchor is unknown and this packet cannot be
+        // trimmed against it. Holding it (instead of dropping it whole)
+        // keeps the samples after the anchor when the first frame lands
+        // mid-packet, which would otherwise open a hole of up to one packet
+        // at the head of the take.
+        let Some(anchor_ns) = anchor_ns else {
+            self.pending = Some((frame.stream_time_ns, bytes));
+            return Ok(());
         };
         if self.encoder.is_none() {
             if frame.sample_rate == 0 || frame.channels == 0 {
@@ -381,12 +428,57 @@ impl<'a> AudioStream<'a> {
             self.sample_rate = frame.sample_rate;
             self.channels = frame.channels;
         }
-        let encoder = self.encoder.as_mut().expect("initialized above");
+        // Same stream, so the held packet shares this one's rate and layout.
+        if let Some((start_ns, bytes)) = self.pending.take() {
+            self.append(start_ns, bytes, anchor_ns)?;
+        }
+        self.append(frame.stream_time_ns, bytes, anchor_ns)
+    }
+
+    /// Write one packet of interleaved f32 bytes, trimming whatever it holds
+    /// from before `anchor_ns` and padding any hole ahead of it.
+    fn append(
+        &mut self,
+        mut start_ns: i64,
+        mut bytes: Vec<u8>,
+        anchor_ns: i64,
+    ) -> Result<(), CaptureError> {
+        let encoder = self.encoder.as_mut().expect("initialized by push");
 
         let bytes_per_second = self.sample_rate as i64 * self.channels as i64 * 4;
-        if let Some(expected) = self.expected_ns {
-            let gap_ns = frame.stream_time_ns - expected;
-            if gap_ns > AUDIO_GAP_TOLERANCE_NS {
+        let sample_bytes = self.channels as usize * 4;
+
+        if start_ns < anchor_ns {
+            // Recorded before the take began: drop that much of the packet.
+            let skip = lead_trim_bytes(
+                anchor_ns - start_ns,
+                bytes_per_second,
+                sample_bytes,
+                bytes.len(),
+            );
+            bytes.drain(..skip);
+            start_ns = anchor_ns;
+            if bytes.is_empty() {
+                return Ok(());
+            }
+        }
+
+        // The first aligned packet carries the whole start offset, which is a
+        // systematic skew rather than jitter, so it is padded exactly. Later
+        // packets keep the jitter allowance.
+        let tolerance = if self.packets == 0 {
+            0
+        } else {
+            AUDIO_GAP_TOLERANCE_NS
+        };
+        if let Some(expected) = self.expected_ns.or(Some(anchor_ns)) {
+            let gap_ns = start_ns - expected;
+            if gap_ns > MAX_SILENCE_NS {
+                log::warn!(
+                    "audio timestamp jumped {:.1}s; resyncing instead of padding",
+                    gap_ns as f64 / 1e9
+                );
+            } else if gap_ns > tolerance {
                 let mut silence_bytes =
                     (gap_ns as i128 * bytes_per_second as i128 / 1_000_000_000) as usize;
                 silence_bytes -= silence_bytes % (self.channels as usize * 4);
@@ -408,7 +500,7 @@ impl<'a> AudioStream<'a> {
 
         let samples = bytes.len() as i64 / (self.channels as i64 * 4);
         let duration_ns = samples * 1_000_000_000 / self.sample_rate as i64;
-        self.expected_ns = Some(frame.stream_time_ns + duration_ns);
+        self.expected_ns = Some(start_ns + duration_ns);
         Ok(())
     }
 
@@ -423,9 +515,23 @@ impl<'a> AudioStream<'a> {
     }
 }
 
+/// Bytes to drop from the front of an audio packet that starts `lead_ns`
+/// before the take's anchor, rounded down to a whole sample frame and never
+/// past the end of the packet.
+fn lead_trim_bytes(lead_ns: i64, bytes_per_second: i64, sample_bytes: usize, len: usize) -> usize {
+    if lead_ns <= 0 || sample_bytes == 0 || bytes_per_second <= 0 {
+        return 0;
+    }
+    let skip = (lead_ns as i128 * bytes_per_second as i128 / 1_000_000_000) as usize;
+    (skip - skip % sample_bytes).min(len - len % sample_bytes)
+}
+
 fn interleave_f32(planes: &[Vec<u8>]) -> Vec<u8> {
     let channels = planes.len();
-    let plane_len = planes.first().map_or(0, Vec::len);
+    // Bound by the shortest plane: indexing every plane at the first one's
+    // length would panic the capture thread, and a panic there loses the
+    // whole take.
+    let plane_len = planes.iter().map(Vec::len).min().unwrap_or(0);
     let mut out = Vec::with_capacity(plane_len * channels);
     let mut offset = 0;
     while offset + 4 <= plane_len {
@@ -435,4 +541,45 @@ fn interleave_f32(planes: &[Vec<u8>]) -> Vec<u8> {
         offset += 4;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{interleave_f32, lead_trim_bytes};
+
+    /// 48kHz stereo f32.
+    const BPS: i64 = 48_000 * 2 * 4;
+    const SAMPLE: usize = 2 * 4;
+
+    #[test]
+    fn lead_trim_should_drop_nothing_when_the_packet_starts_at_the_anchor() {
+        assert_eq!(lead_trim_bytes(0, BPS, SAMPLE, 4_096), 0);
+        assert_eq!(lead_trim_bytes(-5_000_000, BPS, SAMPLE, 4_096), 0);
+    }
+
+    #[test]
+    fn lead_trim_should_drop_the_audio_recorded_before_the_anchor() {
+        // 10ms of 48kHz stereo f32 is 480 frames, 3840 bytes.
+        assert_eq!(lead_trim_bytes(10_000_000, BPS, SAMPLE, 8_192), 3_840);
+    }
+
+    #[test]
+    fn lead_trim_should_land_on_a_sample_frame_boundary() {
+        let skip = lead_trim_bytes(3_333_333, BPS, SAMPLE, 8_192);
+        assert_eq!(skip % SAMPLE, 0);
+    }
+
+    #[test]
+    fn lead_trim_should_never_exceed_the_packet() {
+        // A full second of lead against a 4096-byte packet consumes it all.
+        assert_eq!(lead_trim_bytes(1_000_000_000, BPS, SAMPLE, 4_096), 4_096);
+    }
+
+    #[test]
+    fn interleave_should_bound_by_the_shortest_plane() {
+        let left = vec![1u8; 8];
+        let right = vec![2u8; 4];
+        // One sample frame per plane survives: 4 bytes each.
+        assert_eq!(interleave_f32(&[left, right]).len(), 8);
+    }
 }

@@ -7,8 +7,9 @@ use super::switch_row;
 use crate::app::Session;
 use crate::theme;
 
-pub fn show(ui: &mut Ui, session: &mut Session) {
-    switch_row(
+/// Returns true when a value changed this frame.
+pub fn show(ui: &mut Ui, session: &mut Session) -> bool {
+    let changed = switch_row(
         ui,
         "Click highlight",
         &mut session.project.style.cursor.click_highlight,
@@ -18,4 +19,5 @@ pub fn show(ui: &mut Ui, session: &mut Session) {
             .font(FontId::new(11.0, FontFamily::Proportional))
             .color(theme::TEXT_FAINT),
     );
+    changed
 }

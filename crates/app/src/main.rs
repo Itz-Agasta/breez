@@ -1,6 +1,8 @@
 //! Breez entry point: frameless window setup and eframe bootstrap.
 
 mod app;
+mod export;
+mod playback;
 mod theme;
 mod ui;
 
@@ -8,6 +10,16 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     env_logger::init();
+    // Every media path (record, thumbnails, waveforms, export) shells out to
+    // ffmpeg. Resolving it up front turns a bare "No such file or directory"
+    // at the first recording into one clear message, and is what makes the
+    // README's "downloaded automatically on first run" true.
+    log::info!("locating ffmpeg");
+    if let Err(e) = breez_codec::ensure_ffmpeg() {
+        eprintln!("Breez needs ffmpeg and could not obtain it: {e}");
+        eprintln!("Install ffmpeg and put it on PATH, then start Breez again.");
+        std::process::exit(1);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Breez")

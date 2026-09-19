@@ -12,6 +12,7 @@ use breez_core::project::Project;
 use eframe::egui;
 
 use crate::theme;
+use crate::ui::editor::export_dialog;
 use crate::ui::editor::{self, EditorAction, EditorState};
 use crate::ui::record::{self, RecordAction, RecordState};
 use crate::ui::titlebar::{self, TitlebarAction, TitlebarState};
@@ -46,7 +47,8 @@ pub struct BreezApp {
     mode: Mode,
     flow: RecordFlow,
     session: Option<Session>,
-    editor: EditorState,
+    editor: Option<EditorState>,
+    export: export_dialog::State,
     error: Option<String>,
 }
 
@@ -57,7 +59,8 @@ impl BreezApp {
             mode: Mode::Record,
             flow: RecordFlow::Idle,
             session: None,
-            editor: EditorState::default(),
+            editor: None,
+            export: export_dialog::State::default(),
             error: None,
         }
     }
@@ -78,7 +81,7 @@ impl BreezApp {
                 if let Ok(result) = rx.try_recv() {
                     let flow = std::mem::replace(&mut self.flow, RecordFlow::Idle);
                     if let RecordFlow::Stopping { package_root, .. } = flow {
-                        self.apply_take(package_root, result);
+                        self.apply_take(ctx, package_root, result);
                     }
                 }
             }
@@ -129,7 +132,12 @@ impl BreezApp {
         }
     }
 
-    fn apply_take(&mut self, package_root: PathBuf, result: Result<TakeSummary, CaptureError>) {
+    fn apply_take(
+        &mut self,
+        ctx: &egui::Context,
+        package_root: PathBuf,
+        result: Result<TakeSummary, CaptureError>,
+    ) {
         let opened = result.and_then(|summary| {
             let package = RecPackage::open(&package_root)?;
             let project = Project::load(&package)?;
@@ -137,12 +145,37 @@ impl BreezApp {
         });
         match opened {
             Ok((_, package, project)) => {
-                self.session = Some(Session { package, project });
-                self.editor = EditorState::default();
+                let session = Session { package, project };
+                let mut editor = EditorState::new(ctx, &session);
+                // Decode the opening frame straight away, so the canvas shows
+                // the take instead of the metadata placeholder until the
+                // first play or scrub.
+                editor.player.seek(&session, 0);
+                self.editor = Some(editor);
+                self.session = Some(session);
                 self.error = None;
                 self.mode = Mode::Edit;
             }
             Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Persist pending project edits once the pointer is up, so slider drags
+    /// don't write (and fsync) every frame.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        let (Some(editor), Some(session)) = (&mut self.editor, &self.session) else {
+            return;
+        };
+        if editor.dirty && !ctx.input(|i| i.pointer.any_down()) {
+            // Only a written project is a saved one: clearing `dirty` on a
+            // failed write would drop the edits on the next load.
+            match session.project.save(&session.package) {
+                Ok(()) => editor.dirty = false,
+                Err(e) => {
+                    log::error!("save project: {e}");
+                    self.error = Some(format!("save project: {e}"));
+                }
+            }
         }
     }
 }
@@ -172,8 +205,22 @@ impl eframe::App for BreezApp {
             can_edit: self.session.is_some(),
             busy: !matches!(self.flow, RecordFlow::Idle),
         };
-        if let Some(TitlebarAction::SetMode(mode)) = titlebar::show(ui, &titlebar_state) {
-            self.mode = mode;
+        match titlebar::show(ui, &titlebar_state) {
+            Some(TitlebarAction::SetMode(mode)) => {
+                if mode == Mode::Record
+                    && let Some(editor) = &mut self.editor
+                {
+                    editor.player.pause();
+                }
+                self.mode = mode;
+            }
+            Some(TitlebarAction::Export) => {
+                if let Some(editor) = &mut self.editor {
+                    editor.player.pause();
+                }
+                self.export.open();
+            }
+            None => {}
         }
 
         match self.mode {
@@ -191,17 +238,20 @@ impl eframe::App for BreezApp {
                     None => {}
                 }
             }
-            Mode::Edit => match self.session.as_mut() {
-                Some(session) => {
-                    if let Some(EditorAction::OpenRecord) =
-                        editor::show(ui, &mut self.editor, session)
-                    {
+            Mode::Edit => match (self.session.as_mut(), self.editor.as_mut()) {
+                (Some(session), Some(editor)) => {
+                    if let Some(EditorAction::OpenRecord) = editor::show(ui, editor, session) {
+                        editor.player.pause();
                         self.mode = Mode::Record;
                     }
                 }
-                None => self.mode = Mode::Record,
+                _ => self.mode = Mode::Record,
             },
         }
+        if let (Some(session), Some(editor)) = (&self.session, &self.editor) {
+            self.export.show(ui.ctx(), session, editor.clicks());
+        }
+        self.autosave(ui.ctx());
     }
 }
 
